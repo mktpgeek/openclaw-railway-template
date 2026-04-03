@@ -114,6 +114,15 @@ const INTERNAL_GATEWAY_PORT = Number.parseInt(
 );
 const INTERNAL_GATEWAY_HOST = process.env.INTERNAL_GATEWAY_HOST ?? "127.0.0.1";
 const GATEWAY_TARGET = `http://${INTERNAL_GATEWAY_HOST}:${INTERNAL_GATEWAY_PORT}`;
+const GMAIL_WATCHER_PORT = Number.parseInt(
+  process.env.GMAIL_WATCHER_PORT ?? "8788",
+  10,
+);
+const GMAIL_WATCHER_HOST = process.env.GMAIL_WATCHER_HOST ?? "127.0.0.1";
+const GMAIL_WATCHER_TARGET = `http://${GMAIL_WATCHER_HOST}:${GMAIL_WATCHER_PORT}`;
+const GMAIL_WATCHER_PATH = normalizeProxyBasePath(
+  process.env.GMAIL_WATCHER_PATH ?? "/gmail-pubsub",
+);
 
 const OPENCLAW_ENTRY =
   process.env.OPENCLAW_ENTRY?.trim() || "/openclaw/dist/entry.js";
@@ -138,6 +147,14 @@ function configPath() {
     process.env.OPENCLAW_CONFIG_PATH?.trim() ||
     path.join(STATE_DIR, "openclaw.json")
   );
+}
+
+function readConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(configPath(), "utf8"));
+  } catch {
+    return null;
+  }
 }
 
 function isConfigured() {
@@ -185,9 +202,66 @@ let shuttingDown = false;
 let gatewayRestartCount = 0;
 let gatewayLastStartTime = 0;
 let intentionalRestart = false;
+let gmailWatcherProc = null;
+let gmailWatcherStarting = null;
+let gmailWatcherRestartCount = 0;
+let gmailWatcherLastStartTime = 0;
+let intentionalGmailWatcherRestart = false;
+let gmailWatcherConfigSignature = null;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function getGmailWatcherConfig() {
+  const config = readConfig();
+  if (!config?.hooks?.enabled || !config?.hooks?.gmail) {
+    return null;
+  }
+  return config.hooks.gmail;
+}
+
+function getGmailWatcherSignature(gmailConfig) {
+  if (!gmailConfig) return null;
+  return JSON.stringify({
+    account: gmailConfig.account,
+    label: gmailConfig.label,
+    topic: gmailConfig.topic,
+    subscription: gmailConfig.subscription,
+    pushToken: gmailConfig.pushToken,
+    hookUrl: gmailConfig.hookUrl,
+    includeBody: gmailConfig.includeBody,
+    maxBytes: gmailConfig.maxBytes,
+    renewEveryMinutes: gmailConfig.renewEveryMinutes,
+    serve: gmailConfig.serve,
+    tailscale: gmailConfig.tailscale,
+  });
+}
+
+function getGmailWatcherProbeUrl(gmailConfig) {
+  const serve = gmailConfig?.serve ?? {};
+  const bind = serve.bind || GMAIL_WATCHER_HOST;
+  const port = serve.port || GMAIL_WATCHER_PORT;
+  const watcherPath = normalizeProxyBasePath(
+    serve.path || GMAIL_WATCHER_PATH,
+  );
+  const url = new URL(`http://${bind}:${port}${watcherPath}`);
+  if (gmailConfig?.pushToken) {
+    url.searchParams.set("token", gmailConfig.pushToken);
+  }
+  return url.toString();
+}
+
+function normalizeProxyBasePath(rawPath) {
+  const value = String(rawPath ?? "").trim();
+  if (!value || value === "/") return "/";
+  return (value.startsWith("/") ? value : `/${value}`).replace(/\/+$/, "");
+}
+
+function matchesProxyBasePath(requestPath, basePath) {
+  if (!requestPath || !basePath) return false;
+  if (basePath === "/") return true;
+  return requestPath === basePath || requestPath.startsWith(`${basePath}/`);
 }
 
 async function probeGatewayOnce() {
@@ -335,6 +409,160 @@ async function ensureGatewayRunning() {
   return { ok: true };
 }
 
+async function probeGmailWatcherOnce() {
+  const gmailConfig = getGmailWatcherConfig();
+  if (!gmailConfig) {
+    return { ok: false, reason: "not configured" };
+  }
+
+  try {
+    const res = await fetch(getGmailWatcherProbeUrl(gmailConfig), {
+      method: "GET",
+    });
+    return { ok: true, status: res.status };
+  } catch (err) {
+    if (err.code !== "ECONNREFUSED" && err.cause?.code !== "ECONNREFUSED") {
+      const msg = err.code || err.message;
+      if (msg !== "fetch failed" && msg !== "UND_ERR_CONNECT_TIMEOUT") {
+        log.warn("gmail-watcher", `health check error: ${msg}`);
+      }
+    }
+    return { ok: false, reason: "unreachable" };
+  }
+}
+
+async function waitForGmailWatcherReady(opts = {}) {
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    const probe = await probeGmailWatcherOnce();
+    if (probe.ok) {
+      log.info("gmail-watcher", `ready (status=${probe.status})`);
+      return true;
+    }
+    await sleep(500);
+  }
+
+  log.error(
+    "gmail-watcher",
+    `failed to become ready after ${timeoutMs / 1000} seconds`,
+  );
+  return false;
+}
+
+async function startGmailWatcher() {
+  if (gmailWatcherProc) return;
+
+  const gmailConfig = getGmailWatcherConfig();
+  if (!gmailConfig) {
+    throw new Error("Gmail watcher cannot start: not configured");
+  }
+
+  gmailWatcherConfigSignature = getGmailWatcherSignature(gmailConfig);
+  gmailWatcherLastStartTime = Date.now();
+  gmailWatcherProc = childProcess.spawn(
+    OPENCLAW_NODE,
+    clawArgs(["webhooks", "gmail", "run"]),
+    {
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        OPENCLAW_STATE_DIR: STATE_DIR,
+        OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+      },
+    },
+  );
+
+  log.info(
+    "gmail-watcher",
+    `starting with command: ${OPENCLAW_NODE} ${clawArgs(["webhooks", "gmail", "run"]).join(" ")}`,
+  );
+
+  gmailWatcherProc.on("error", (err) => {
+    log.error("gmail-watcher", `spawn error: ${String(err)}`);
+    gmailWatcherProc = null;
+  });
+
+  gmailWatcherProc.on("exit", (code, signal) => {
+    log.error("gmail-watcher", `exited code=${code} signal=${signal}`);
+    const uptime = Date.now() - gmailWatcherLastStartTime;
+    gmailWatcherProc = null;
+    if (!shuttingDown && !intentionalGmailWatcherRestart && getGmailWatcherConfig()) {
+      if (uptime > 30_000) {
+        gmailWatcherRestartCount = 0;
+      } else {
+        gmailWatcherRestartCount++;
+      }
+      const delay = Math.min(2000 * Math.pow(2, gmailWatcherRestartCount), 60_000);
+      log.info(
+        "gmail-watcher",
+        `scheduling auto-restart in ${delay / 1000}s (attempt ${gmailWatcherRestartCount}, uptime ${Math.round(uptime / 1000)}s)...`,
+      );
+      setTimeout(async () => {
+        if (shuttingDown || gmailWatcherProc || !getGmailWatcherConfig()) {
+          return;
+        }
+
+        const probe = await probeGmailWatcherOnce();
+        if (probe.ok) {
+          log.info("gmail-watcher", "watcher still reachable; assuming it restarted itself");
+          gmailWatcherRestartCount = 0;
+          return;
+        }
+
+        ensureGmailWatcherRunning().catch((err) => {
+          log.error("gmail-watcher", `auto-restart failed: ${err.message}`);
+        });
+      }, delay);
+    }
+  });
+}
+
+async function ensureGmailWatcherRunning() {
+  const gmailConfig = getGmailWatcherConfig();
+  if (!gmailConfig) {
+    return { ok: false, reason: "not configured" };
+  }
+
+  const nextSignature = getGmailWatcherSignature(gmailConfig);
+  if (gmailWatcherProc && gmailWatcherConfigSignature === nextSignature) {
+    return { ok: true };
+  }
+
+  const probe = await probeGmailWatcherOnce();
+  if (probe.ok && gmailWatcherConfigSignature === nextSignature) {
+    return { ok: true, reason: "reachable" };
+  }
+
+  if (gmailWatcherProc && gmailWatcherConfigSignature !== nextSignature) {
+    intentionalGmailWatcherRestart = true;
+    try {
+      gmailWatcherProc.kill("SIGTERM");
+    } catch (err) {
+      log.warn("gmail-watcher", `kill error: ${err.message}`);
+    }
+    await sleep(750);
+    gmailWatcherProc = null;
+    intentionalGmailWatcherRestart = false;
+  }
+
+  if (!gmailWatcherStarting) {
+    gmailWatcherStarting = (async () => {
+      await startGmailWatcher();
+      const ready = await waitForGmailWatcherReady({ timeoutMs: 30_000 });
+      if (!ready) {
+        throw new Error("Gmail watcher did not become ready in time");
+      }
+    })().finally(() => {
+      gmailWatcherStarting = null;
+    });
+  }
+
+  await gmailWatcherStarting;
+  return { ok: true };
+}
+
 function isGatewayStarting() {
   return gatewayStarting !== null;
 }
@@ -432,7 +660,11 @@ app.get("/healthz", async (_req, res) => {
   if (isConfigured()) {
     gateway = isGatewayReady() ? "ready" : "starting";
   }
-  res.json({ ok: true, gateway });
+  let gmailWatcher = "unconfigured";
+  if (getGmailWatcherConfig()) {
+    gmailWatcher = gmailWatcherProc ? "ready" : "starting";
+  }
+  res.json({ ok: true, gateway, gmailWatcher });
 });
 
 app.get("/setup/healthz", async (_req, res) => {
@@ -1083,6 +1315,13 @@ app.post("/setup/api/reset", requireSetupAuth, async (_req, res) => {
       gatewayProc = null;
       intentionalRestart = false;
     }
+    if (gmailWatcherProc) {
+      intentionalGmailWatcherRestart = true;
+      gmailWatcherProc.kill("SIGTERM");
+      await sleep(750);
+      gmailWatcherProc = null;
+      intentionalGmailWatcherRestart = false;
+    }
     await runCmd(OPENCLAW_NODE, clawArgs(["gateway", "stop"]));
     fs.rmSync(configPath(), { force: true });
     res
@@ -1405,7 +1644,10 @@ const PROXY_ORIGIN = process.env.RAILWAY_PUBLIC_DOMAIN
   : GATEWAY_TARGET;
 
 proxy.on("proxyReq", (proxyReq, req, res) => {
-  if (!req.url?.startsWith("/hooks/")) {
+  if (
+    !matchesProxyBasePath(req.path, "/hooks") &&
+    !matchesProxyBasePath(req.path, GMAIL_WATCHER_PATH)
+  ) {
     proxyReq.setHeader("Authorization", `Bearer ${OPENCLAW_GATEWAY_TOKEN}`);
   }
   proxyReq.setHeader("Origin", PROXY_ORIGIN);
@@ -1419,6 +1661,17 @@ proxy.on("proxyReqWs", (proxyReq, req, socket, options, head) => {
 app.use(async (req, res) => {
   if (req.path === "/") {
     return res.sendFile(path.join(process.cwd(), "src", "public", "loading.html"));
+  }
+
+  if (matchesProxyBasePath(req.path, GMAIL_WATCHER_PATH)) {
+    try {
+      await ensureGmailWatcherRunning();
+    } catch {
+      return res
+        .status(503)
+        .sendFile(path.join(process.cwd(), "src", "public", "loading.html"));
+    }
+    return proxy.web(req, res, { target: GMAIL_WATCHER_TARGET });
   }
 
   if (!isConfigured() && !req.path.startsWith("/setup")) {
@@ -1467,8 +1720,9 @@ const server = app.listen(PORT, () => {
         log.warn("wrapper", `doctor --fix failed: ${err.message}`);
       }
       await ensureGatewayRunning();
+      await ensureGmailWatcherRunning();
     })().catch((err) => {
-      log.error("wrapper", `failed to start gateway at boot: ${err.message}`);
+      log.error("wrapper", `failed to start services at boot: ${err.message}`);
     });
   }
 });
@@ -1547,6 +1801,21 @@ async function gracefulShutdown(signal) {
       }
     } catch (err) {
       log.warn("wrapper", `error killing gateway: ${err.message}`);
+    }
+  }
+
+  if (gmailWatcherProc) {
+    try {
+      gmailWatcherProc.kill("SIGTERM");
+      await Promise.race([
+        new Promise((resolve) => gmailWatcherProc.on("exit", resolve)),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]);
+      if (gmailWatcherProc && !gmailWatcherProc.killed) {
+        gmailWatcherProc.kill("SIGKILL");
+      }
+    } catch (err) {
+      log.warn("wrapper", `error killing gmail watcher: ${err.message}`);
     }
   }
 

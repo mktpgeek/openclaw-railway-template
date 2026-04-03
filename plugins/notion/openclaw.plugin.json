@@ -1,0 +1,44 @@
+{
+  "id": "notion",
+  "name": "Notion",
+  "description": "Notion workspace tools for OpenClaw",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "apiKey": {
+        "type": "string"
+      },
+      "baseUrl": {
+        "type": "string"
+      },
+      "notionVersion": {
+        "type": "string"
+      }
+    }
+  },
+  "uiHints": {
+    "apiKey": {
+      "label": "Notion integration token",
+      "placeholder": "secret_...",
+      "sensitive": true
+    },
+    "baseUrl": {
+      "label": "Notion API base URL",
+      "placeholder": "https://api.notion.com/v1"
+    },
+    "notionVersion": {
+      "label": "Notion-Version header",
+      "placeholder": "2026-03-11"
+    }
+  },
+  "contracts": {
+    "tools": [
+      "notion_search",
+      "notion_get_page",
+      "notion_get_block_children",
+      "notion_query_database"
+    ]
+  }
+}

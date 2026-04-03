@@ -1,0 +1,63 @@
+{
+  "id": "google-calendar",
+  "name": "Google Calendar",
+  "description": "Google Calendar tools for OpenClaw",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "clientId": {
+        "type": "string"
+      },
+      "clientSecret": {
+        "type": "string"
+      },
+      "refreshToken": {
+        "type": "string"
+      },
+      "calendarId": {
+        "type": "string"
+      },
+      "baseUrl": {
+        "type": "string"
+      }
+    }
+  },
+  "uiHints": {
+    "clientId": {
+      "label": "Google OAuth client ID",
+      "placeholder": "1234567890-abc.apps.googleusercontent.com"
+    },
+    "clientSecret": {
+      "label": "Google OAuth client secret",
+      "placeholder": "GOCSPX-...",
+      "sensitive": true
+    },
+    "refreshToken": {
+      "label": "Google OAuth refresh token",
+      "placeholder": "1//0...",
+      "sensitive": true
+    },
+    "calendarId": {
+      "label": "Default calendar ID",
+      "placeholder": "primary"
+    },
+    "baseUrl": {
+      "label": "Google Calendar API base URL",
+      "placeholder": "https://www.googleapis.com/calendar/v3"
+    }
+  },
+  "contracts": {
+    "tools": [
+      "google_calendar_list_calendars",
+      "google_calendar_list_events",
+      "google_calendar_get_event",
+      "google_calendar_search_events",
+      "google_calendar_create_event",
+      "google_calendar_update_event",
+      "google_calendar_delete_event",
+      "google_calendar_freebusy"
+    ]
+  }
+}
