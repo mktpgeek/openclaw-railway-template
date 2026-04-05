@@ -38,6 +38,13 @@
       showPairingModal: false,
       isReady: false,
       tuiEnabled: false,
+      acpDefaultAgent: 'codex',
+      acpPermissionMode: 'approve-all',
+      acpPluginToolsMcpBridge: false,
+      codexCliVersion: '',
+      codexAuthReady: false,
+      codexAuthPlaceholder: false,
+      codexWorkspaceTrusted: false,
       exporting: false,
       showExportInfo: false,
       showDevicesModal: false,
@@ -48,6 +55,61 @@
 
       get currentGroup() {
         return this.authGroups.find(g => g.value === this.selectedGroup);
+      },
+
+      authChoiceNeedsSecret(choice) {
+        return [
+          'apiKey',
+          'openai-api-key',
+          'gemini-api-key',
+          'deepseek-api-key',
+          'openrouter-api-key',
+          'xai-api-key',
+          'mistral-api-key',
+          'together-api-key',
+          'huggingface-api-key',
+          'moonshot-api-key',
+          'moonshot-api-key-cn',
+          'kimi-code-api-key',
+          'minimax-global-api',
+          'minimax-cn-api',
+          'zai-api-key',
+          'modelstudio-api-key',
+          'modelstudio-api-key-cn',
+          'modelstudio-standard-api-key',
+          'modelstudio-standard-api-key-cn',
+          'venice-api-key',
+          'chutes-api-key',
+          'kilocode-api-key',
+          'xiaomi-api-key',
+          'volcengine-api-key',
+          'byteplus-api-key',
+          'qianfan-api-key',
+          'ai-gateway-api-key',
+          'cloudflare-ai-gateway-api-key',
+          'litellm-api-key',
+          'opencode-zen',
+          'opencode-go',
+          'synthetic-api-key',
+          'custom-api-key'
+        ].includes(choice);
+      },
+
+      get selectedAuthNeedsSecret() {
+        return this.authChoiceNeedsSecret(this.selectedAuth);
+      },
+
+      get selectedAuthNoSecretHint() {
+        if (this.selectedAuth === 'openai-codex') {
+          return 'This option uses your existing ChatGPT/Codex login, so leave the API key field empty. If you leave Model blank, setup will default to openai-codex/gpt-5.4.';
+        }
+        if (this.selectedAuth === 'google-gemini-cli') {
+          return 'This option uses Gemini CLI OAuth, so you should leave the API key field empty here.';
+        }
+        if (this.selectedAuth === 'github-copilot') {
+          return 'This option uses GitHub device login, so you should leave the API key field empty here.';
+        }
+        return 'This auth method does not use an API key in setup. Leave the credential field empty and finish login when prompted.';
       },
 
       async init() {
@@ -71,6 +133,13 @@
           this.configured = j.configured;
           this.openclawVersion = j.openclawVersion || '';
           this.tuiEnabled = j.tuiEnabled || false;
+          this.acpDefaultAgent = j.acpDefaultAgent || 'codex';
+          this.acpPermissionMode = j.acpPermissionMode || 'approve-all';
+          this.acpPluginToolsMcpBridge = Boolean(j.acpPluginToolsMcpBridge);
+          this.codexCliVersion = j.codexCliVersion || '';
+          this.codexAuthReady = Boolean(j.codexAuthReady);
+          this.codexAuthPlaceholder = Boolean(j.codexAuthPlaceholder);
+          this.codexWorkspaceTrusted = Boolean(j.codexWorkspaceTrusted);
           this.status = j.configured ? 'Configured - open /openclaw' : 'Not configured - run setup below';
           this.authGroups = j.authGroups || [];
           if (this.authGroups.length > 0) {
@@ -93,6 +162,15 @@
         if (this.authChoices.length > 0) {
           this.selectedAuth = this.authChoices[0].value;
         }
+        if (!this.selectedAuthNeedsSecret) {
+          this.authSecret = '';
+        }
+      },
+
+      handleAuthChoiceChange() {
+        if (!this.selectedAuthNeedsSecret) {
+          this.authSecret = '';
+        }
       },
 
       nextStep() {
@@ -106,7 +184,7 @@
       async runSetup() {
         const payload = {
           authChoice: this.selectedAuth,
-          authSecret: this.authSecret,
+          authSecret: this.selectedAuthNeedsSecret ? this.authSecret : '',
           model: this.model,
           customBaseUrl: this.customBaseUrl,
           customModelId: this.customModelId,
@@ -222,6 +300,59 @@
           } else {
             this.log += '\n✗ Doctor found issues\n';
           }
+        } catch (e) {
+          this.log += 'Error: ' + String(e) + '\n';
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      async runAcpDoctor() {
+        this.log = 'Running ACP doctor...\n';
+        this.loading = true;
+
+        try {
+          const res = await fetch('/setup/api/acp/doctor', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' }
+          });
+          const text = await res.text();
+          let j;
+          try { j = JSON.parse(text); } catch (_e) { j = { ok: false, output: text }; }
+          this.log += (j.output || JSON.stringify(j, null, 2));
+          if (j.ok) {
+            this.log += '\n✓ ACP doctor completed successfully\n';
+          } else {
+            this.log += '\n✗ ACP doctor found issues\n';
+          }
+        } catch (e) {
+          this.log += 'Error: ' + String(e) + '\n';
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      async enableAcp() {
+        this.log = 'Enabling ACP on this instance...\n';
+        this.loading = true;
+
+        try {
+          const res = await fetch('/setup/api/acp/enable', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' }
+          });
+          const text = await res.text();
+          let j;
+          try { j = JSON.parse(text); } catch (_e) { j = { ok: false, output: text }; }
+          this.log += (j.output || JSON.stringify(j, null, 2));
+          if (j.ok) {
+            this.log += '\n✓ ACP enabled successfully\n';
+          } else {
+            this.log += '\n✗ Failed to enable ACP\n';
+          }
+          await this.refreshStatus();
         } catch (e) {
           this.log += 'Error: ' + String(e) + '\n';
         } finally {
@@ -387,6 +518,80 @@
       </div>
 
       <div class="card">
+        <h3 class="card-title" style="font-size:1rem">ACP Agents</h3>
+        <p class="card-subtitle">Codex, Claude, Gemini, and other ACPX-backed harnesses are configured for Railway-safe defaults.</p>
+        <div class="config-summary mb-4">
+          <dl>
+            <div class="config-row">
+              <dt>Backend</dt>
+              <dd><span class="badge badge-indigo">acpx</span></dd>
+            </div>
+            <div class="config-row">
+              <dt>Default Agent</dt>
+              <dd x-text="acpDefaultAgent"></dd>
+            </div>
+            <div class="config-row">
+              <dt>Permissions</dt>
+              <dd x-text="acpPermissionMode"></dd>
+            </div>
+            <div class="config-row">
+              <dt>Plugin Tools Bridge</dt>
+              <dd x-text="acpPluginToolsMcpBridge ? 'Enabled' : 'Disabled'"></dd>
+            </div>
+          </dl>
+        </div>
+        <div class="action-grid">
+          <div class="action-card action-blue">
+            <div class="action-card-header">
+              <div class="action-icon">
+                <svg class="icon-md" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+              </div>
+              <span class="action-title">Enable ACP</span>
+            </div>
+            <p class="action-desc">Applies ACP config to an existing deployment and restarts the gateway.</p>
+            <button @click="enableAcp()" :disabled="loading" class="action-btn">
+              Enable ACP
+            </button>
+          </div>
+
+          <div class="action-card action-violet">
+            <div class="action-card-header">
+              <div class="action-icon">
+                <svg class="icon-md" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 3.104v5.714a2.143 2.143 0 01-2.143 2.143H1.893m7.857-7.857L12.9 6.25m-3.15-3.146L6.6 6.25m3.15 6.429v8.214m0 0l3.15-3.15m-3.15 3.15l-3.15-3.15m9.836-7.714h3.214A2.143 2.143 0 0021.793 8.89V6.75a2.143 2.143 0 00-2.143-2.143h-2.143"/></svg>
+              </div>
+              <span class="action-title">Run ACP Doctor</span>
+            </div>
+            <p class="action-desc">Checks whether the ACP backend and harness adapters are ready on this deployment.</p>
+            <button @click="runAcpDoctor()" :disabled="loading" class="action-btn">
+              Run ACP Doctor
+            </button>
+          </div>
+        </div>
+        <div class="section-block" style="margin-bottom:0">
+          <p class="label">Quick start</p>
+          <p class="text-sm text-muted" style="line-height:1.6">
+            Use <code class="code-inline">/acp doctor</code> in chat for a readiness check, then try
+            <code class="code-inline">/acp spawn codex --bind here</code> or
+            <code class="code-inline">/acp spawn claude --mode persistent --thread auto</code>.
+          </p>
+          <p
+            x-show="acpDefaultAgent === 'codex' && (!codexAuthReady || codexAuthPlaceholder || !codexWorkspaceTrusted)"
+            class="text-sm text-muted"
+            style="line-height:1.6;margin-top:0.75rem"
+          >
+            Codex readiness:
+            <span x-text="codexCliVersion || 'CLI missing'"></span>,
+            workspace trusted:
+            <span x-text="codexWorkspaceTrusted ? 'yes' : 'no'"></span>,
+            auth ready:
+            <span x-text="codexAuthReady && !codexAuthPlaceholder ? 'yes' : 'no'"></span>.
+            Railway deployments need a real <code class="code-inline">OPENAI_API_KEY</code> or
+            <code class="code-inline">CODEX_API_KEY</code> for Codex ACP sessions.
+          </p>
+        </div>
+      </div>
+
+      <div class="card">
         <h3 class="card-title" style="font-size:1rem">Devices</h3>
         <p class="card-subtitle">Manage devices and channel access</p>
         <div class="action-grid">
@@ -519,17 +724,21 @@
 
           <div class="form-group">
             <label class="label">Auth Method</label>
-            <select x-model="selectedAuth" class="select">
+            <select x-model="selectedAuth" @change="handleAuthChoiceChange()" class="select">
               <template x-for="o in authChoices" :key="o.value">
                 <option :value="o.value" x-text="o.label + (o.hint ? ' — ' + o.hint : '')"></option>
               </template>
             </select>
           </div>
 
-          <div class="form-group">
+          <div x-show="selectedAuthNeedsSecret" class="form-group">
             <label class="label">API Key / Token</label>
             <input x-model="authSecret" type="password" placeholder="Paste your API key or token" class="input" />
           </div>
+
+          <p x-show="!selectedAuthNeedsSecret" class="form-hint" style="margin-top:-0.25rem">
+            <span x-text="selectedAuthNoSecretHint"></span>
+          </p>
 
           <template x-if="selectedAuth === 'custom-api-key'">
             <div>
@@ -566,7 +775,7 @@
 
           <div class="form-group">
             <label class="label">Model</label>
-            <input x-model="model" type="text" placeholder="e.g. openai/gpt-4.1, anthropic/claude-sonnet-4" class="input" />
+            <input x-model="model" type="text" placeholder="e.g. openai/gpt-5.4, openai-codex/gpt-5.4, anthropic/claude-sonnet-4" class="input" />
             <p class="form-hint">Format: provider/model-name</p>
           </div>
         </div>
@@ -647,6 +856,10 @@
                   <span x-show="!telegramToken && !discordToken && !(slackBotToken && slackAppToken)" class="text-muted">None</span>
                 </dd>
               </div>
+              <div class="config-row">
+                <dt>ACP Agents</dt>
+                <dd>Enabled via <code class="code-inline">acpx</code> with default agent <span x-text="acpDefaultAgent"></span></dd>
+              </div>
             </dl>
           </div>
 
@@ -665,7 +878,7 @@
 
           <div x-show="log" class="log-output" x-text="log"></div>
 
-          <p class="text-xs text-muted mt-4">Reset deletes the config file so you can rerun onboarding. Channel access approval grants DM access when dmPolicy=pairing.</p>
+          <p class="text-xs text-muted mt-4">Reset deletes the config file so you can rerun onboarding. ACP is configured automatically during setup, and channel access approval grants DM access when dmPolicy=pairing.</p>
         </div>
       </div>
 

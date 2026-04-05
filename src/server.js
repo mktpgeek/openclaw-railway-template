@@ -123,6 +123,8 @@ const GMAIL_WATCHER_TARGET = `http://${GMAIL_WATCHER_HOST}:${GMAIL_WATCHER_PORT}
 const GMAIL_WATCHER_PATH = normalizeProxyBasePath(
   process.env.GMAIL_WATCHER_PATH ?? "/gmail-pubsub",
 );
+const MANAGE_GMAIL_WATCHER =
+  process.env.OPENCLAW_MANAGE_GMAIL_WATCHER?.toLowerCase() === "true";
 
 const OPENCLAW_ENTRY =
   process.env.OPENCLAW_ENTRY?.trim() || "/openclaw/dist/entry.js";
@@ -137,6 +139,59 @@ const TUI_MAX_SESSION_MS = Number.parseInt(
   process.env.TUI_MAX_SESSION_MS ?? "1800000",
   10,
 );
+const ACP_DEFAULT_AGENT =
+  process.env.OPENCLAW_ACP_DEFAULT_AGENT?.trim() || "codex";
+const ACP_PERMISSION_MODE =
+  process.env.OPENCLAW_ACP_PERMISSION_MODE?.trim() || "approve-all";
+const ACP_NON_INTERACTIVE_PERMISSIONS =
+  process.env.OPENCLAW_ACP_NON_INTERACTIVE_PERMISSIONS?.trim() || "deny";
+const ACP_PLUGIN_TOOLS_MCP_BRIDGE =
+  process.env.OPENCLAW_ACP_PLUGIN_TOOLS_MCP_BRIDGE?.toLowerCase() === "true";
+const ACP_MAX_CONCURRENT_SESSIONS = Number.parseInt(
+  process.env.OPENCLAW_ACP_MAX_CONCURRENT_SESSIONS ?? "8",
+  10,
+);
+const ACP_RUNTIME_TTL_MINUTES = Number.parseInt(
+  process.env.OPENCLAW_ACP_RUNTIME_TTL_MINUTES ?? "120",
+  10,
+);
+const ACP_EXPECTED_VERSION =
+  process.env.OPENCLAW_ACP_EXPECTED_VERSION?.trim() || "0.4.1";
+const ACP_COMMAND =
+  process.env.OPENCLAW_ACP_COMMAND?.trim() || "/usr/local/bin/acpx";
+const CODEX_CLI_VERSION =
+  process.env.OPENCLAW_CODEX_CLI_VERSION?.trim() || "0.118.0";
+const RAILWAY_VOLUME_PATH =
+  process.env.RAILWAY_VOLUME_MOUNT_PATH?.trim() || "/data";
+const CODEX_HOME =
+  process.env.CODEX_HOME?.trim() || path.join(RAILWAY_VOLUME_PATH, ".codex");
+const CODEX_CONFIG_PATH = path.join(CODEX_HOME, "config.toml");
+const CODEX_AUTH_PATH = path.join(CODEX_HOME, "auth.json");
+const MODEL_AUTH_STORE_PATH = path.join(
+  STATE_DIR,
+  "agents",
+  "main",
+  "agent",
+  "auth-profiles.json",
+);
+const DEFAULT_OPENAI_CODEX_MODEL = "openai-codex/gpt-5.4";
+
+const ACP_ALLOWED_AGENTS = [
+  "claude",
+  "codex",
+  "copilot",
+  "cursor",
+  "droid",
+  "gemini",
+  "iflow",
+  "kilocode",
+  "kimi",
+  "kiro",
+  "openclaw",
+  "opencode",
+  "pi",
+  "qwen",
+];
 
 function clawArgs(args) {
   return [OPENCLAW_ENTRY, ...args];
@@ -149,12 +204,21 @@ function configPath() {
   );
 }
 
-function readConfig() {
+function readJsonFile(filePath) {
   try {
-    return JSON.parse(fs.readFileSync(configPath(), "utf8"));
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
   } catch {
     return null;
   }
+}
+
+function writeJsonFile(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function readConfig() {
+  return readJsonFile(configPath());
 }
 
 function isConfigured() {
@@ -163,6 +227,357 @@ function isConfigured() {
   } catch {
     return false;
   }
+}
+
+function isPlaceholderCredential(value) {
+  return String(value ?? "").trim() === "not-needed";
+}
+
+function isDummyCredential(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "dummy" || normalized === "not-needed";
+}
+
+function getConfiguredModel() {
+  return String(readConfig()?.agents?.defaults?.model?.primary ?? "").trim();
+}
+
+function normalizeOpenaiCodexModel(model) {
+  const normalized = String(model ?? "").trim();
+  if (!normalized) {
+    return DEFAULT_OPENAI_CODEX_MODEL;
+  }
+  if (normalized.startsWith("openai-codex/")) {
+    return normalized;
+  }
+  if (normalized.startsWith("openai/")) {
+    return `openai-codex/${normalized.slice("openai/".length)}`;
+  }
+  return "";
+}
+
+function getModelAuthStore() {
+  return readJsonFile(MODEL_AUTH_STORE_PATH);
+}
+
+function hasOauthProfile(authStore, provider) {
+  const profiles = authStore?.profiles;
+  if (!profiles || typeof profiles !== "object") {
+    return false;
+  }
+
+  return Object.values(profiles).some((profile) => (
+    profile?.provider === provider &&
+    profile?.type === "oauth" &&
+    (
+      String(profile?.access ?? "").trim() ||
+      String(profile?.refresh ?? "").trim() ||
+      String(profile?.tokens?.access_token ?? "").trim() ||
+      String(profile?.tokens?.refresh_token ?? "").trim()
+    )
+  ));
+}
+
+function removePlaceholderAuthProfiles(authStore) {
+  const profiles = authStore?.profiles;
+  if (!profiles || typeof profiles !== "object") {
+    return [];
+  }
+
+  const removed = [];
+  for (const [profileId, profile] of Object.entries(profiles)) {
+    const placeholderKey =
+      profile?.type === "api_key" && isDummyCredential(profile?.key);
+    const placeholderToken =
+      profile?.type === "token" && isDummyCredential(profile?.token);
+    if (!placeholderKey && !placeholderToken) {
+      continue;
+    }
+    delete profiles[profileId];
+    removed.push(profileId);
+  }
+  return removed;
+}
+
+function removeConfigAuthProfiles(profileIds) {
+  if (!profileIds.length) {
+    return { changed: false, removed: [] };
+  }
+
+  const config = readConfig();
+  const profiles = config?.auth?.profiles;
+  if (!profiles || typeof profiles !== "object") {
+    return { changed: false, removed: [] };
+  }
+
+  const removed = [];
+  for (const profileId of profileIds) {
+    if (!Object.prototype.hasOwnProperty.call(profiles, profileId)) {
+      continue;
+    }
+    delete profiles[profileId];
+    removed.push(profileId);
+  }
+
+  if (!removed.length) {
+    return { changed: false, removed: [] };
+  }
+
+  if (Object.keys(profiles).length === 0) {
+    delete config.auth.profiles;
+    if (Object.keys(config.auth).length === 0) {
+      delete config.auth;
+    }
+  }
+
+  writeJsonFile(configPath(), config);
+  return { changed: true, removed };
+}
+
+function ensureCodexWorkspaceTrust(projectPath) {
+  const normalizedPath = String(projectPath ?? "").trim();
+  const header = `[projects.${JSON.stringify(normalizedPath)}]`;
+
+  try {
+    fs.mkdirSync(CODEX_HOME, { recursive: true });
+    let current = "";
+    try {
+      current = fs.readFileSync(CODEX_CONFIG_PATH, "utf8");
+    } catch {}
+
+    if (current.includes(header)) {
+      return { ok: true, changed: false, path: CODEX_CONFIG_PATH };
+    }
+
+    const block = `${header}\ntrust_level = "trusted"\n`;
+    const next = current.trimEnd()
+      ? `${current.trimEnd()}\n\n${block}`
+      : block;
+    fs.writeFileSync(CODEX_CONFIG_PATH, next, "utf8");
+    return { ok: true, changed: true, path: CODEX_CONFIG_PATH };
+  } catch (err) {
+    return {
+      ok: false,
+      changed: false,
+      path: CODEX_CONFIG_PATH,
+      error: err.message,
+    };
+  }
+}
+
+function isCodexWorkspaceTrusted(projectPath) {
+  const normalizedPath = String(projectPath ?? "").trim();
+  const header = `[projects.${JSON.stringify(normalizedPath)}]`;
+  try {
+    const current = fs.readFileSync(CODEX_CONFIG_PATH, "utf8");
+    return current.includes(header);
+  } catch {
+    return false;
+  }
+}
+
+function getCodexAuthStatus() {
+  let fileAuthMode = null;
+  let fileKey = "";
+  let hasOauthTokens = false;
+
+  try {
+    const raw = readJsonFile(CODEX_AUTH_PATH) || {};
+    fileAuthMode = raw?.auth_mode ?? null;
+    fileKey =
+      raw?.CODEX_API_KEY?.trim() || raw?.OPENAI_API_KEY?.trim() || "";
+    hasOauthTokens = Boolean(
+      raw?.tokens?.access_token &&
+      raw?.tokens?.refresh_token &&
+      raw?.auth_mode === "chatgpt"
+    );
+  } catch {}
+
+  const envOpenAiKey = process.env.OPENAI_API_KEY?.trim() || "";
+  const envCodexKey = process.env.CODEX_API_KEY?.trim() || "";
+  const effectiveKey =
+    (!isPlaceholderCredential(envCodexKey) && envCodexKey) ||
+    (!isPlaceholderCredential(envOpenAiKey) && envOpenAiKey) ||
+    (!isPlaceholderCredential(fileKey) && fileKey) ||
+    "";
+
+  return {
+    authPath: CODEX_AUTH_PATH,
+    fileAuthMode,
+    envOpenAiPlaceholder: isPlaceholderCredential(envOpenAiKey),
+    envCodexPlaceholder: isPlaceholderCredential(envCodexKey),
+    filePlaceholder: isPlaceholderCredential(fileKey),
+    hasOauthTokens,
+    hasPlaceholderOnly: !Boolean(effectiveKey || hasOauthTokens) && Boolean(
+      isPlaceholderCredential(fileKey) ||
+      isPlaceholderCredential(envOpenAiKey) ||
+      isPlaceholderCredential(envCodexKey)
+    ),
+    hasUsableCredential: Boolean(effectiveKey || hasOauthTokens),
+  };
+}
+
+async function setDefaultModelWithFallback(model) {
+  const attempts = [];
+  const normalized = String(model ?? "").trim();
+  if (normalized) {
+    attempts.push(normalized);
+  }
+  if (!attempts.includes(DEFAULT_OPENAI_CODEX_MODEL)) {
+    attempts.push(DEFAULT_OPENAI_CODEX_MODEL);
+  }
+
+  let lastResult = null;
+  for (const attempt of attempts) {
+    const result = await runCmd(OPENCLAW_NODE, clawArgs(["models", "set", attempt]));
+    lastResult = { ...result, model: attempt };
+    if (result.code === 0) {
+      return { ok: true, changed: getConfiguredModel() !== attempt, ...lastResult };
+    }
+  }
+
+  return { ok: false, changed: false, ...(lastResult || { code: 1, output: "", model: "" }) };
+}
+
+async function repairModelAuth(reason = "Repairing model auth") {
+  let output = `[model auth repair] ${reason}\n`;
+
+  const sync = await runCmd(OPENCLAW_NODE, clawArgs(["models", "status", "--json"]));
+  output += `[models status --json] exit=${sync.code}\n`;
+  if (sync.output) {
+    output += `${sync.output}\n`;
+  }
+
+  const authStore = getModelAuthStore();
+  if (!authStore?.profiles || typeof authStore.profiles !== "object") {
+    output += `[model auth repair] no auth profile store found at ${MODEL_AUTH_STORE_PATH}\n`;
+    return {
+      ok: sync.code === 0,
+      changed: false,
+      output,
+    };
+  }
+
+  let changed = false;
+  const removedProfiles = removePlaceholderAuthProfiles(authStore);
+  if (removedProfiles.length > 0) {
+    writeJsonFile(MODEL_AUTH_STORE_PATH, authStore);
+    changed = true;
+    output += `[auth-profiles] removed placeholder profiles: ${removedProfiles.join(", ")}\n`;
+
+    const configCleanup = removeConfigAuthProfiles(removedProfiles);
+    if (configCleanup.changed) {
+      output += `[config] removed auth profile entries: ${configCleanup.removed.join(", ")}\n`;
+    }
+  }
+
+  const currentModel = getConfiguredModel();
+  const hasOpenaiPlaceholder = removedProfiles.some((profileId) => (
+    profileId === "openai:default" || profileId.startsWith("openai:")
+  ));
+  const hasOpenaiCodexOauth = hasOauthProfile(authStore, "openai-codex");
+
+  if (
+    hasOpenaiPlaceholder &&
+    hasOpenaiCodexOauth &&
+    currentModel &&
+    currentModel.startsWith("openai/")
+  ) {
+    const preferredModel = normalizeOpenaiCodexModel(currentModel);
+    const setResult = await setDefaultModelWithFallback(preferredModel);
+    output += `[models set ${setResult.model}] exit=${setResult.code}\n`;
+    if (setResult.output) {
+      output += `${setResult.output}\n`;
+    }
+    if (setResult.ok) {
+      changed = true;
+      output += `[model auth repair] switched default model from ${currentModel} to ${setResult.model}\n`;
+    } else {
+      output += "[model auth repair] unable to switch to an openai-codex model automatically\n";
+    }
+  } else if (hasOpenaiPlaceholder && !hasOpenaiCodexOauth) {
+    output += "[model auth repair] removed placeholder OpenAI auth, but no openai-codex OAuth profile was available for automatic migration\n";
+  }
+
+  return {
+    ok: true,
+    changed,
+    output,
+  };
+}
+
+function buildChildEnv(extra = {}, opts = {}) {
+  const quiet = opts.quiet === true;
+  const env = {
+    ...process.env,
+    ...extra,
+  };
+
+  for (const key of ["OPENAI_API_KEY", "CODEX_API_KEY"]) {
+    if (isPlaceholderCredential(env[key])) {
+      delete env[key];
+      if (!quiet) {
+        log.warn(
+          "env",
+          `${key}=not-needed removed from child process environment; ACP harnesses need a real key or CLI login`,
+        );
+      }
+    }
+  }
+
+  for (const [key, relatedKeys] of [
+    ["ANTHROPIC_API_KEY", ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_BASE"]],
+    ["CLAUDEMAX_API_KEY", ["CLAUDEMAX_BASE_URL", "CLAUDEMAX_API"]],
+  ]) {
+    if (isDummyCredential(env[key])) {
+      delete env[key];
+      for (const relatedKey of relatedKeys) {
+        delete env[relatedKey];
+      }
+      if (!quiet) {
+        log.warn(
+          "env",
+          `${key} dummy placeholder removed from child process environment; Claude ACP needs a real setup-token or API key`,
+        );
+      }
+    }
+  }
+
+  return env;
+}
+
+async function ensureCodexCliSupport() {
+  let output = "";
+
+  const trust = ensureCodexWorkspaceTrust(WORKSPACE_DIR);
+  if (trust.ok) {
+    output += `[codex config] workspace trust ${trust.changed ? "updated" : "ok"} (${trust.path})\n`;
+  } else {
+    output += `[codex config] failed (${trust.path}): ${trust.error}\n`;
+  }
+
+  let codexVersion = await runCmd("codex", ["--version"]);
+  if (codexVersion.code !== 0 || !codexVersion.output.includes(CODEX_CLI_VERSION)) {
+    const install = await runCmd("npm", [
+      "install",
+      "-g",
+      `@openai/codex@${CODEX_CLI_VERSION}`,
+    ]);
+    output += `[npm install -g @openai/codex@${CODEX_CLI_VERSION}] exit=${install.code}\n${install.output || ""}`;
+    codexVersion = await runCmd("codex", ["--version"]);
+  }
+
+  output += `[codex --version] exit=${codexVersion.code}\n${codexVersion.output || ""}`;
+
+  const auth = getCodexAuthStatus();
+  output += `[codex auth] mode=${auth.fileAuthMode || "none"} usable=${auth.hasUsableCredential} placeholder=${auth.hasPlaceholderOnly}\n`;
+
+  if (!auth.hasUsableCredential) {
+    output +=
+      "[codex auth] Codex ACP on Railway needs a real OPENAI_API_KEY or CODEX_API_KEY. The placeholder value 'not-needed' is not usable.\n";
+  }
+
+  return output;
 }
 
 async function syncAllowedOrigins() {
@@ -310,6 +725,12 @@ async function startGateway() {
 
   fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+  const codexTrust = ensureCodexWorkspaceTrust(WORKSPACE_DIR);
+  if (codexTrust.ok && codexTrust.changed) {
+    log.info("gateway", `trusted Codex workspace at ${WORKSPACE_DIR}`);
+  } else if (!codexTrust.ok) {
+    log.warn("gateway", `failed to prepare Codex config: ${codexTrust.error}`);
+  }
 
   const stopResult = await runCmd(OPENCLAW_NODE, clawArgs(["gateway", "stop"]));
   log.info("gateway", `stop existing gateway exit=${stopResult.code}`);
@@ -331,11 +752,10 @@ async function startGateway() {
   gatewayLastStartTime = Date.now();
   gatewayProc = childProcess.spawn(OPENCLAW_NODE, clawArgs(args), {
     stdio: "inherit",
-    env: {
-      ...process.env,
+    env: buildChildEnv({
       OPENCLAW_STATE_DIR: STATE_DIR,
       OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
-    },
+    }),
   });
 
   const safeArgs = args.map((arg, i) =>
@@ -662,7 +1082,12 @@ app.get("/healthz", async (_req, res) => {
   }
   let gmailWatcher = "unconfigured";
   if (getGmailWatcherConfig()) {
-    gmailWatcher = gmailWatcherProc ? "ready" : "starting";
+    if (MANAGE_GMAIL_WATCHER) {
+      gmailWatcher = gmailWatcherProc ? "ready" : "starting";
+    } else {
+      const probe = await probeGmailWatcherOnce();
+      gmailWatcher = probe.ok ? "ready" : "starting";
+    }
   }
   res.json({ ok: true, gateway, gmailWatcher });
 });
@@ -699,6 +1124,9 @@ app.get("/setup", requireSetupAuth, (_req, res) => {
 
 app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
   const { version, channelsHelp } = await getOpenclawInfo();
+  const codexVersion = await runCmd("codex", ["--version"]);
+  const codexAuth = getCodexAuthStatus();
+  const codexTrusted = isCodexWorkspaceTrusted(WORKSPACE_DIR);
 
   const authGroups = [
     {
@@ -934,6 +1362,14 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
     channelsAddHelp: channelsHelp,
     authGroups,
     tuiEnabled: ENABLE_WEB_TUI,
+    acpDefaultAgent: ACP_DEFAULT_AGENT,
+    acpPermissionMode: ACP_PERMISSION_MODE,
+    acpPluginToolsMcpBridge: ACP_PLUGIN_TOOLS_MCP_BRIDGE,
+    codexCliVersion: codexVersion.code === 0 ? codexVersion.output.trim() : "",
+    codexAuthMode: codexAuth.fileAuthMode,
+    codexAuthReady: codexAuth.hasUsableCredential,
+    codexAuthPlaceholder: codexAuth.hasPlaceholderOnly,
+    codexWorkspaceTrusted: codexTrusted,
   });
 });
 
@@ -960,45 +1396,12 @@ function buildOnboardArgs(payload) {
   ];
 
   if (payload.authChoice) {
-    args.push("--auth-choice", payload.authChoice);
+    const onboardAuthChoice =
+      payload.authChoice === "openai-codex" ? "skip" : payload.authChoice;
+    args.push("--auth-choice", onboardAuthChoice);
 
     const secret = (payload.authSecret || "").trim();
-    const map = {
-      apiKey: "--anthropic-api-key",
-      "openai-api-key": "--openai-api-key",
-      "gemini-api-key": "--gemini-api-key",
-      "deepseek-api-key": "--deepseek-api-key",
-      "openrouter-api-key": "--openrouter-api-key",
-      "xai-api-key": "--xai-api-key",
-      "mistral-api-key": "--mistral-api-key",
-      "together-api-key": "--together-api-key",
-      "huggingface-api-key": "--huggingface-api-key",
-      "moonshot-api-key": "--moonshot-api-key",
-      "moonshot-api-key-cn": "--moonshot-api-key",
-      "kimi-code-api-key": "--kimi-code-api-key",
-      "minimax-global-api": "--minimax-api-key",
-      "minimax-cn-api": "--minimax-api-key",
-      "zai-api-key": "--zai-api-key",
-      "modelstudio-api-key": "--modelstudio-api-key",
-      "modelstudio-api-key-cn": "--modelstudio-api-key-cn",
-      "modelstudio-standard-api-key": "--modelstudio-standard-api-key",
-      "modelstudio-standard-api-key-cn": "--modelstudio-standard-api-key-cn",
-      "venice-api-key": "--venice-api-key",
-      "chutes-api-key": "--chutes-api-key",
-      "kilocode-api-key": "--kilocode-api-key",
-      "xiaomi-api-key": "--xiaomi-api-key",
-      "volcengine-api-key": "--volcengine-api-key",
-      "byteplus-api-key": "--byteplus-api-key",
-      "qianfan-api-key": "--qianfan-api-key",
-      "ai-gateway-api-key": "--ai-gateway-api-key",
-      "cloudflare-ai-gateway-api-key": "--cloudflare-ai-gateway-api-key",
-      "litellm-api-key": "--litellm-api-key",
-      "opencode-zen": "--opencode-zen-api-key",
-      "opencode-go": "--opencode-go-api-key",
-      "synthetic-api-key": "--synthetic-api-key",
-      "custom-api-key": "--custom-api-key",
-    };
-    const flag = map[payload.authChoice];
+    const flag = AUTH_SECRET_FLAGS[payload.authChoice];
     if (flag && secret) {
       args.push(flag, secret);
     }
@@ -1024,15 +1427,89 @@ function buildOnboardArgs(payload) {
   return args;
 }
 
+const AUTH_SECRET_FLAGS = {
+  apiKey: "--anthropic-api-key",
+  "openai-api-key": "--openai-api-key",
+  "gemini-api-key": "--gemini-api-key",
+  "deepseek-api-key": "--deepseek-api-key",
+  "openrouter-api-key": "--openrouter-api-key",
+  "xai-api-key": "--xai-api-key",
+  "mistral-api-key": "--mistral-api-key",
+  "together-api-key": "--together-api-key",
+  "huggingface-api-key": "--huggingface-api-key",
+  "moonshot-api-key": "--moonshot-api-key",
+  "moonshot-api-key-cn": "--moonshot-api-key",
+  "kimi-code-api-key": "--kimi-code-api-key",
+  "minimax-global-api": "--minimax-api-key",
+  "minimax-cn-api": "--minimax-api-key",
+  "zai-api-key": "--zai-api-key",
+  "modelstudio-api-key": "--modelstudio-api-key",
+  "modelstudio-api-key-cn": "--modelstudio-api-key-cn",
+  "modelstudio-standard-api-key": "--modelstudio-standard-api-key",
+  "modelstudio-standard-api-key-cn": "--modelstudio-standard-api-key-cn",
+  "venice-api-key": "--venice-api-key",
+  "chutes-api-key": "--chutes-api-key",
+  "kilocode-api-key": "--kilocode-api-key",
+  "xiaomi-api-key": "--xiaomi-api-key",
+  "volcengine-api-key": "--volcengine-api-key",
+  "byteplus-api-key": "--byteplus-api-key",
+  "qianfan-api-key": "--qianfan-api-key",
+  "ai-gateway-api-key": "--ai-gateway-api-key",
+  "cloudflare-ai-gateway-api-key": "--cloudflare-ai-gateway-api-key",
+  "litellm-api-key": "--litellm-api-key",
+  "opencode-zen": "--opencode-zen-api-key",
+  "opencode-go": "--opencode-go-api-key",
+  "synthetic-api-key": "--synthetic-api-key",
+  "custom-api-key": "--custom-api-key",
+};
+
+function authChoiceNeedsSecret(authChoice) {
+  return Boolean(AUTH_SECRET_FLAGS[authChoice]);
+}
+
+function validateProviderSecret(authChoice, rawSecret) {
+  if (!authChoiceNeedsSecret(authChoice)) {
+    return null;
+  }
+
+  const secret = String(rawSecret ?? "").trim();
+  if (!isDummyCredential(secret)) {
+    return null;
+  }
+
+  if (authChoice === "openai-api-key") {
+    return "Invalid OpenAI API key: placeholder values like 'not-needed' are not valid. Use a real OpenAI API key, or choose 'OpenAI Codex (ChatGPT OAuth)' instead.";
+  }
+
+  return "Invalid provider credential: placeholder values like 'not-needed' or 'dummy' are not valid setup credentials.";
+}
+
+function resolveRequestedModel(payload) {
+  const requestedModel = String(payload.model ?? "").trim();
+  if (payload.authChoice === "openai-codex") {
+    const normalized = normalizeOpenaiCodexModel(requestedModel);
+    if (!normalized) {
+      return {
+        ok: false,
+        error:
+          "OpenAI Codex auth requires an openai-codex model. Use a model like openai-codex/gpt-5.4.",
+      };
+    }
+    return { ok: true, model: normalized };
+  }
+
+  return { ok: true, model: requestedModel };
+}
+
 function runCmd(cmd, args, opts = {}) {
   return new Promise((resolve) => {
     const proc = childProcess.spawn(cmd, args, {
       ...opts,
-      env: {
-        ...process.env,
+      env: buildChildEnv({
         OPENCLAW_STATE_DIR: STATE_DIR,
         OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
-      },
+        ...(opts.env || {}),
+      }, { quiet: true }),
     });
 
     let out = "";
@@ -1046,6 +1523,51 @@ function runCmd(cmd, args, opts = {}) {
 
     proc.on("close", (code) => resolve({ code: code ?? 0, output: out }));
   });
+}
+
+async function runDoctorFix(reason = "Repairing config and state") {
+  const result = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs(["doctor", "--fix", "--non-interactive", "--yes"]),
+  );
+  let output = `[doctor] ${reason}\n`;
+  output += `[doctor --fix --non-interactive --yes] exit=${result.code}\n`;
+  if (result.output) {
+    output += `${result.output}\n`;
+  }
+  return {
+    ok: result.code === 0,
+    code: result.code,
+    output,
+  };
+}
+
+async function configureChannel(name, { addArgs = [], configWrites = [] } = {}) {
+  let output = "";
+
+  if (addArgs.length > 0) {
+    const addResult = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs(["channels", "add", "--channel", name, ...addArgs]),
+    );
+    output += `\n[channels add ${name}] exit=${addResult.code}\n${addResult.output || "(no output)"}\n`;
+  }
+
+  for (const write of configWrites) {
+    const args = write.json
+      ? ["config", "set", "--json", write.path, JSON.stringify(write.value)]
+      : ["config", "set", write.path, String(write.value)];
+    const result = await runCmd(OPENCLAW_NODE, clawArgs(args));
+    output += `[config set ${write.path}] exit=${result.code}\n${result.output || "(no output)"}\n`;
+  }
+
+  const getResult = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs(["config", "get", `channels.${name}`]),
+  );
+  output += `[${name} verify] exit=${getResult.code}\n${getResult.output || "(no output)"}`;
+
+  return output;
 }
 
 const VALID_AUTH_CHOICES = [
@@ -1103,6 +1625,17 @@ function validatePayload(payload) {
   if (payload.authChoice && !VALID_AUTH_CHOICES.includes(payload.authChoice)) {
     return `Invalid authChoice: ${payload.authChoice}`;
   }
+  const modelResolution = resolveRequestedModel(payload);
+  if (!modelResolution.ok) {
+    return modelResolution.error;
+  }
+  const providerSecretError = validateProviderSecret(
+    payload.authChoice,
+    payload.authSecret,
+  );
+  if (providerSecretError) {
+    return providerSecretError;
+  }
   const stringFields = [
     "telegramToken",
     "discordToken",
@@ -1124,6 +1657,148 @@ function validatePayload(payload) {
   return null;
 }
 
+async function configureAcpSupport() {
+  let output = "\n[setup] Configuring ACP agents...\n";
+  output += await ensureCodexCliSupport();
+
+  const installResult = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs(["plugins", "install", "acpx"]),
+  );
+  output += `[plugins install acpx] exit=${installResult.code}\n${installResult.output || ""}`;
+
+  const configWrites = [
+    ["config", "set", "plugins.entries.acpx.enabled", "true"],
+    ["config", "set", "acp.enabled", "true"],
+    ["config", "set", "acp.dispatch.enabled", "true"],
+    ["config", "set", "acp.backend", "acpx"],
+    ["config", "set", "acp.defaultAgent", ACP_DEFAULT_AGENT],
+    ["config", "set", "acp.maxConcurrentSessions", String(ACP_MAX_CONCURRENT_SESSIONS)],
+    ["config", "set", "acp.runtime.ttlMinutes", String(ACP_RUNTIME_TTL_MINUTES)],
+    [
+      "config",
+      "set",
+      "--json",
+      "acp.allowedAgents",
+      JSON.stringify(ACP_ALLOWED_AGENTS),
+    ],
+    [
+      "config",
+      "set",
+      "--json",
+      "acp.stream",
+      JSON.stringify({
+        coalesceIdleMs: 300,
+        maxChunkChars: 1200,
+      }),
+    ],
+    ["config", "set", "session.threadBindings.enabled", "true"],
+    ["config", "set", "session.threadBindings.idleHours", "24"],
+    ["config", "set", "session.threadBindings.maxAgeHours", "0"],
+    [
+      "config",
+      "set",
+      "plugins.entries.acpx.config.permissionMode",
+      ACP_PERMISSION_MODE,
+    ],
+    [
+      "config",
+      "set",
+      "plugins.entries.acpx.config.nonInteractivePermissions",
+      ACP_NON_INTERACTIVE_PERMISSIONS,
+    ],
+    [
+      "config",
+      "set",
+      "plugins.entries.acpx.config.pluginToolsMcpBridge",
+      ACP_PLUGIN_TOOLS_MCP_BRIDGE ? "true" : "false",
+    ],
+    [
+      "config",
+      "set",
+      "plugins.entries.acpx.config.command",
+      ACP_COMMAND,
+    ],
+    [
+      "config",
+      "set",
+      "plugins.entries.acpx.config.expectedVersion",
+      ACP_EXPECTED_VERSION,
+    ],
+  ];
+
+  for (const args of configWrites) {
+    const result = await runCmd(OPENCLAW_NODE, clawArgs(args));
+    output += `[${args.slice(0, 3).join(" ")} ${args[3]}] exit=${result.code}\n`;
+    if (result.output) {
+      output += `${result.output}\n`;
+    }
+  }
+
+  const pluginDoctorResult = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs(["plugins", "doctor"]),
+  );
+  output += `[plugins doctor] exit=${pluginDoctorResult.code}\n${pluginDoctorResult.output || ""}`;
+
+  return output;
+}
+
+async function repairAcpRuntimeConfig(reason = "Repairing ACP runtime config") {
+  let output = `[acp runtime repair] ${reason}\n`;
+  let changed = false;
+
+  for (const [pathKey, value] of [
+    ["plugins.entries.acpx.config.command", ACP_COMMAND],
+    ["plugins.entries.acpx.config.expectedVersion", ACP_EXPECTED_VERSION],
+  ]) {
+    const current = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs(["config", "get", pathKey]),
+    );
+    const currentValue = current.output.trim();
+    if (current.code === 0 && currentValue === value) {
+      output += `[config get ${pathKey}] ok (${currentValue})\n`;
+      continue;
+    }
+
+    const result = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs(["config", "set", pathKey, value]),
+    );
+    output += `[config set ${pathKey}] exit=${result.code}\n`;
+    if (result.output) {
+      output += `${result.output}\n`;
+    }
+    if (result.code === 0) {
+      changed = true;
+    }
+  }
+
+  return {
+    ok: true,
+    changed,
+    output,
+  };
+}
+
+async function enableAcpOnConfiguredInstance() {
+  let output = "";
+  output += await configureAcpSupport();
+  const authRepair = await repairModelAuth(
+    "Repairing placeholder provider auth before ACP restart",
+  );
+  output += `\n${authRepair.output}`;
+  const doctor = await runDoctorFix(
+    "Normalizing config and cron storage before ACP restart",
+  );
+  output += `\n${doctor.output}`;
+  output += "\n[setup] Restarting gateway for ACP changes...\n";
+  await restartGateway();
+  output += "[setup] Gateway restarted.\n";
+  return output;
+}
+
 app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
   try {
     if (isConfigured()) {
@@ -1131,7 +1806,8 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
       return res.json({
         ok: true,
         output:
-          "Already configured.\nUse Reset setup if you want to rerun onboarding.\n",
+          "Already configured.\nApplying container-side ACP/runtime fixes to the existing instance...\n\n" +
+          (await enableAcpOnConfiguredInstance()),
       });
     }
 
@@ -1143,6 +1819,7 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
     if (validationError) {
       return res.status(400).json({ ok: false, output: validationError });
     }
+    const resolvedModel = resolveRequestedModel(payload);
     const onboardArgs = buildOnboardArgs(payload);
     const onboard = await runCmd(OPENCLAW_NODE, clawArgs(onboardArgs));
 
@@ -1160,10 +1837,10 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
           "config",
           "set",
           "gateway.controlUi.allowInsecureAuth",
-          "true",
+          "false",
         ]),
       );
-      extra += `[config] gateway.controlUi.allowInsecureAuth=true exit=${allowInsecureResult.code}\n`;
+      extra += `[config] gateway.controlUi.allowInsecureAuth=false exit=${allowInsecureResult.code}\n`;
 
       const tokenResult = await runCmd(
         OPENCLAW_NODE,
@@ -1188,62 +1865,121 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
       );
       extra += `[config] gateway.trustedProxies exit=${proxiesResult.code}\n`;
 
-      if (payload.model?.trim()) {
-        extra += `[setup] Setting model to ${payload.model.trim()}...\n`;
+      const hookSessionKeyResult = await runCmd(
+        OPENCLAW_NODE,
+        clawArgs(["config", "set", "hooks.defaultSessionKey", "hook:ingress"]),
+      );
+      extra += `[config] hooks.defaultSessionKey exit=${hookSessionKeyResult.code}\n`;
+
+      const hookAgentsResult = await runCmd(
+        OPENCLAW_NODE,
+        clawArgs([
+          "config",
+          "set",
+          "--json",
+          "hooks.allowedAgentIds",
+          '["main"]',
+        ]),
+      );
+      extra += `[config] hooks.allowedAgentIds exit=${hookAgentsResult.code}\n`;
+
+      extra += await configureAcpSupport();
+
+      if (resolvedModel.model) {
+        extra += `[setup] Setting model to ${resolvedModel.model}...\n`;
         const modelResult = await runCmd(
           OPENCLAW_NODE,
-          clawArgs(["models", "set", payload.model.trim()]),
+          clawArgs(["models", "set", resolvedModel.model]),
         );
         extra += `[models set] exit=${modelResult.code}\n${modelResult.output || ""}`;
       }
 
-      async function configureChannel(name, cfgObj) {
-        const set = await runCmd(
-          OPENCLAW_NODE,
-          clawArgs([
-            "config",
-            "set",
-            "--json",
-            `channels.${name}`,
-            JSON.stringify(cfgObj),
-          ]),
-        );
-        const get = await runCmd(
-          OPENCLAW_NODE,
-          clawArgs(["config", "get", `channels.${name}`]),
-        );
-        return (
-          `\n[${name} config] exit=${set.code} (output ${set.output.length} chars)\n${set.output || "(no output)"}` +
-          `\n[${name} verify] exit=${get.code} (output ${get.output.length} chars)\n${get.output || "(no output)"}`
-        );
-      }
-
       if (payload.telegramToken?.trim()) {
         extra += await configureChannel("telegram", {
-          enabled: true,
-          dmPolicy: "pairing",
-          botToken: payload.telegramToken.trim(),
-          groupPolicy: "open",
-          streamMode: "partial",
+          addArgs: ["--token", payload.telegramToken.trim()],
+          configWrites: [
+            { path: "channels.telegram.enabled", value: "true" },
+            { path: "channels.telegram.dmPolicy", value: "pairing" },
+            { path: "channels.telegram.groupPolicy", value: "allowlist" },
+            { path: "channels.telegram.accounts.default.groupPolicy", value: "allowlist" },
+            { path: "channels.telegram.streaming", value: "partial" },
+            {
+              path: "channels.telegram.groups",
+              value: {},
+              json: true,
+            },
+            {
+              path: "channels.telegram.accounts.default.groups",
+              value: {},
+              json: true,
+            },
+            {
+              path: "channels.telegram.threadBindings",
+              value: {
+                enabled: true,
+                spawnAcpSessions: true,
+              },
+              json: true,
+            },
+          ],
         });
       }
 
       if (payload.discordToken?.trim()) {
         extra += await configureChannel("discord", {
-          enabled: true,
-          token: payload.discordToken.trim(),
-          groupPolicy: "open",
-          dm: { policy: "pairing" },
+          addArgs: ["--token", payload.discordToken.trim()],
+          configWrites: [
+            { path: "channels.discord.enabled", value: "true" },
+            { path: "channels.discord.dmPolicy", value: "pairing" },
+            { path: "channels.discord.groupPolicy", value: "allowlist" },
+            {
+              path: "channels.discord.channels",
+              value: {},
+              json: true,
+            },
+            {
+              path: "channels.discord.threadBindings",
+              value: {
+                enabled: true,
+                spawnAcpSessions: true,
+              },
+              json: true,
+            },
+          ],
         });
       }
 
       if (payload.slackBotToken?.trim() || payload.slackAppToken?.trim()) {
+        const addArgs = [];
+        if (payload.slackBotToken?.trim()) {
+          addArgs.push("--bot-token", payload.slackBotToken.trim());
+        }
+        if (payload.slackAppToken?.trim()) {
+          addArgs.push("--app-token", payload.slackAppToken.trim());
+        }
         extra += await configureChannel("slack", {
-          enabled: true,
-          botToken: payload.slackBotToken?.trim() || undefined,
-          appToken: payload.slackAppToken?.trim() || undefined,
+          addArgs,
+          configWrites: [
+            { path: "channels.slack.enabled", value: "true" },
+            { path: "channels.slack.dmPolicy", value: "pairing" },
+            { path: "channels.slack.groupPolicy", value: "allowlist" },
+            {
+              path: "channels.slack.channels",
+              value: {},
+              json: true,
+            },
+          ],
         });
       }
+
+      const doctor = await runDoctorFix(
+        "Normalizing fresh setup before first gateway start",
+      );
+      extra += `\n${doctor.output}`;
+      const authRepair = await repairModelAuth(
+        "Repairing placeholder provider auth after setup",
+      );
+      extra += `\n${authRepair.output}`;
 
       extra += "\n[setup] Starting gateway...\n";
       await restartGateway();
@@ -1333,12 +2069,82 @@ app.post("/setup/api/reset", requireSetupAuth, async (_req, res) => {
 });
 
 app.post("/setup/api/doctor", requireSetupAuth, async (_req, res) => {
-  const args = ["doctor", "--non-interactive", "--repair"];
-  const result = await runCmd(OPENCLAW_NODE, clawArgs(args));
-  return res.status(result.code === 0 ? 200 : 500).json({
-    ok: result.code === 0,
-    output: result.output,
+  const result = await runDoctorFix("Manual repair from setup UI");
+  const acpRepair = await repairAcpRuntimeConfig(
+    "Repairing ACP runtime config from setup UI",
+  );
+  const authRepair = await repairModelAuth(
+    "Repairing placeholder provider auth from setup UI",
+  );
+  return res.status(result.ok && acpRepair.ok && authRepair.ok ? 200 : 500).json({
+    ok: result.ok && acpRepair.ok && authRepair.ok,
+    output: `${result.output}\n${acpRepair.output}\n${authRepair.output}`,
   });
+});
+
+app.post("/setup/api/acp/doctor", requireSetupAuth, async (_req, res) => {
+  const [pluginDoctor, inspect, acpEnabled, acpBackend, acpDefaultAgent, codexVersion] =
+    await Promise.all([
+      runCmd(OPENCLAW_NODE, clawArgs(["plugins", "doctor"])),
+      runCmd(OPENCLAW_NODE, clawArgs(["plugins", "inspect", "acpx"])),
+      runCmd(OPENCLAW_NODE, clawArgs(["config", "get", "acp.enabled"])),
+      runCmd(OPENCLAW_NODE, clawArgs(["config", "get", "acp.backend"])),
+      runCmd(OPENCLAW_NODE, clawArgs(["config", "get", "acp.defaultAgent"])),
+      runCmd("codex", ["--version"]),
+    ]);
+
+  const codexAuth = getCodexAuthStatus();
+  const codexTrusted = isCodexWorkspaceTrusted(WORKSPACE_DIR);
+  const defaultAgent = acpDefaultAgent.output.trim();
+  const codexReady =
+    codexVersion.code === 0 &&
+    codexAuth.hasUsableCredential &&
+    codexTrusted;
+
+  const ok =
+    pluginDoctor.code === 0 &&
+    acpEnabled.output.trim() === "true" &&
+    acpBackend.output.trim() === "acpx" &&
+    (defaultAgent !== "codex" || codexReady);
+
+  const output = [
+    `[config] acp.enabled => ${acpEnabled.output.trim() || "(empty)"}`,
+    `[config] acp.backend => ${acpBackend.output.trim() || "(empty)"}`,
+    `[config] acp.defaultAgent => ${defaultAgent || "(empty)"}`,
+    `[codex --version] exit=${codexVersion.code}`,
+    codexVersion.output || "",
+    `[codex auth] mode=${codexAuth.fileAuthMode || "none"} usable=${codexAuth.hasUsableCredential} placeholder=${codexAuth.hasPlaceholderOnly}`,
+    `[codex config] workspace trusted=${codexTrusted} path=${WORKSPACE_DIR}`,
+    `[plugins inspect acpx] exit=${inspect.code}`,
+    inspect.output || "",
+    `[plugins doctor] exit=${pluginDoctor.code}`,
+    pluginDoctor.output || "",
+  ].join("\n");
+
+  return res.status(ok ? 200 : 500).json({
+    ok,
+    output,
+  });
+});
+
+app.post("/setup/api/acp/enable", requireSetupAuth, async (_req, res) => {
+  try {
+    if (!isConfigured()) {
+      return res.status(400).json({
+        ok: false,
+        output: "OpenClaw is not configured yet. Run setup first.",
+      });
+    }
+
+    await ensureGatewayRunning();
+    const output = await enableAcpOnConfiguredInstance();
+    return res.json({ ok: true, output });
+  } catch (err) {
+    log.error("setup", `acp enable error: ${String(err)}`);
+    return res
+      .status(500)
+      .json({ ok: false, output: `Internal error: ${String(err)}` });
+  }
 });
 
 app.get("/setup/api/devices", requireSetupAuth, async (_req, res) => {
@@ -1665,7 +2471,11 @@ app.use(async (req, res) => {
 
   if (matchesProxyBasePath(req.path, GMAIL_WATCHER_PATH)) {
     try {
-      await ensureGmailWatcherRunning();
+      if (MANAGE_GMAIL_WATCHER) {
+        await ensureGmailWatcherRunning();
+      } else {
+        await ensureGatewayRunning();
+      }
     } catch {
       return res
         .status(503)
@@ -1712,15 +2522,32 @@ const server = app.listen(PORT, () => {
   if (isConfigured()) {
     (async () => {
       try {
-        log.info("wrapper", "running openclaw doctor --fix...");
-        const dr = await runCmd(OPENCLAW_NODE, clawArgs(["doctor", "--fix"]));
-        log.info("wrapper", `doctor --fix exit=${dr.code}`);
-        if (dr.output) log.info("wrapper", dr.output);
+        log.info(
+          "wrapper",
+          "running openclaw doctor --fix --non-interactive --yes...",
+        );
+        const dr = await runDoctorFix("Startup repair before gateway boot");
+        log.info("wrapper", dr.output.trimEnd());
+        const acpRepair = await repairAcpRuntimeConfig(
+          "Startup repair for ACP runtime config",
+        );
+        log.info("wrapper", acpRepair.output.trimEnd());
+        const authRepair = await repairModelAuth(
+          "Startup repair for placeholder provider auth",
+        );
+        log.info("wrapper", authRepair.output.trimEnd());
       } catch (err) {
         log.warn("wrapper", `doctor --fix failed: ${err.message}`);
       }
       await ensureGatewayRunning();
-      await ensureGmailWatcherRunning();
+      if (MANAGE_GMAIL_WATCHER) {
+        await ensureGmailWatcherRunning();
+      } else if (getGmailWatcherConfig()) {
+        log.info(
+          "gmail-watcher",
+          "wrapper watcher disabled; relying on OpenClaw-managed Gmail hook listener",
+        );
+      }
     })().catch((err) => {
       log.error("wrapper", `failed to start services at boot: ${err.message}`);
     });

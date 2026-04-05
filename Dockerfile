@@ -1,4 +1,4 @@
-FROM node:22-bookworm
+FROM node:24-bookworm
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -12,7 +12,7 @@ RUN apt-get update \
     zip \
   && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g openclaw@2026.4.2 clawhub@latest
+RUN npm install -g openclaw@2026.4.2 clawhub@latest acpx@0.4.1 @openai/codex@0.118.0 @anthropic-ai/claude-code@2.1.92
 
 WORKDIR /app
 
