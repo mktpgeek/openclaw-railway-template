@@ -1675,6 +1675,102 @@ async function listPendingPairingRequests(channel) {
   }
 }
 
+async function applyRequestedModel(resolvedModel) {
+  if (!resolvedModel?.model) {
+    return "";
+  }
+
+  const modelResult = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs(["models", "set", resolvedModel.model]),
+  );
+  return `[setup] Setting model to ${resolvedModel.model}...\n[models set] exit=${modelResult.code}\n${modelResult.output || ""}`;
+}
+
+async function configureRequestedChannels(payload) {
+  let output = "";
+
+  if (payload.telegramToken?.trim()) {
+    output += await configureChannel("telegram", {
+      addArgs: ["--token", payload.telegramToken.trim()],
+      configWrites: [
+        { path: "channels.telegram.enabled", value: "true" },
+        { path: "channels.telegram.dmPolicy", value: "pairing" },
+        { path: "channels.telegram.groupPolicy", value: "allowlist" },
+        { path: "channels.telegram.accounts.default.groupPolicy", value: "allowlist" },
+        { path: "channels.telegram.streaming", value: "partial" },
+        {
+          path: "channels.telegram.groups",
+          value: {},
+          json: true,
+        },
+        {
+          path: "channels.telegram.accounts.default.groups",
+          value: {},
+          json: true,
+        },
+        {
+          path: "channels.telegram.threadBindings",
+          value: {
+            enabled: true,
+            spawnAcpSessions: true,
+          },
+          json: true,
+        },
+      ],
+    });
+  }
+
+  if (payload.discordToken?.trim()) {
+    output += await configureChannel("discord", {
+      addArgs: ["--token", payload.discordToken.trim()],
+      configWrites: [
+        { path: "channels.discord.enabled", value: "true" },
+        { path: "channels.discord.dmPolicy", value: "pairing" },
+        { path: "channels.discord.groupPolicy", value: "allowlist" },
+        {
+          path: "channels.discord.channels",
+          value: {},
+          json: true,
+        },
+        {
+          path: "channels.discord.threadBindings",
+          value: {
+            enabled: true,
+            spawnAcpSessions: true,
+          },
+          json: true,
+        },
+      ],
+    });
+  }
+
+  if (payload.slackBotToken?.trim() || payload.slackAppToken?.trim()) {
+    const addArgs = [];
+    if (payload.slackBotToken?.trim()) {
+      addArgs.push("--bot-token", payload.slackBotToken.trim());
+    }
+    if (payload.slackAppToken?.trim()) {
+      addArgs.push("--app-token", payload.slackAppToken.trim());
+    }
+    output += await configureChannel("slack", {
+      addArgs,
+      configWrites: [
+        { path: "channels.slack.enabled", value: "true" },
+        { path: "channels.slack.dmPolicy", value: "pairing" },
+        { path: "channels.slack.groupPolicy", value: "allowlist" },
+        {
+          path: "channels.slack.channels",
+          value: {},
+          json: true,
+        },
+      ],
+    });
+  }
+
+  return output;
+}
+
 const VALID_AUTH_CHOICES = [
   "apiKey",
   "openai-api-key",
@@ -1901,7 +1997,7 @@ async function repairAcpRuntimeConfig(reason = "Repairing ACP runtime config") {
   };
 }
 
-async function enableAcpOnConfiguredInstance() {
+async function enableAcpOnConfiguredInstance(payload = {}, resolvedModel = null) {
   let output = "";
   output += "\n[setup] Re-applying gateway settings for existing instance...\n";
 
@@ -1945,6 +2041,14 @@ async function enableAcpOnConfiguredInstance() {
   output += `[config] gateway.trustedProxies exit=${proxiesResult.code}\n`;
 
   output += await configureAcpSupport();
+  const modelUpdate = await applyRequestedModel(resolvedModel);
+  if (modelUpdate) {
+    output += `\n${modelUpdate}\n`;
+  }
+  const channelUpdates = await configureRequestedChannels(payload);
+  if (channelUpdates) {
+    output += `\n[setup] Applying requested channel updates...\n${channelUpdates}\n`;
+  }
   const authRepair = await repairModelAuth(
     "Repairing placeholder provider auth before ACP restart",
   );
@@ -1961,24 +2065,24 @@ async function enableAcpOnConfiguredInstance() {
 
 app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
   try {
-    if (isConfigured()) {
-      return res.json({
-        ok: true,
-        output:
-          "Already configured.\nApplying container-side ACP/runtime fixes to the existing instance...\n\n" +
-          (await enableAcpOnConfiguredInstance()),
-      });
-    }
-
-    fs.mkdirSync(STATE_DIR, { recursive: true });
-    fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
-
     const payload = req.body || {};
     const validationError = validatePayload(payload);
     if (validationError) {
       return res.status(400).json({ ok: false, output: validationError });
     }
     const resolvedModel = resolveRequestedModel(payload);
+
+    if (isConfigured()) {
+      return res.json({
+        ok: true,
+        output:
+          "Already configured.\nApplying container-side ACP/runtime fixes and requested updates to the existing instance...\n\n" +
+          (await enableAcpOnConfiguredInstance(payload, resolvedModel)),
+      });
+    }
+
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
     const onboardArgs = buildOnboardArgs(payload);
     const onboard = await runCmd(OPENCLAW_NODE, clawArgs(onboardArgs));
 
@@ -2044,92 +2148,8 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
 
       extra += await configureAcpSupport();
 
-      if (resolvedModel.model) {
-        extra += `[setup] Setting model to ${resolvedModel.model}...\n`;
-        const modelResult = await runCmd(
-          OPENCLAW_NODE,
-          clawArgs(["models", "set", resolvedModel.model]),
-        );
-        extra += `[models set] exit=${modelResult.code}\n${modelResult.output || ""}`;
-      }
-
-      if (payload.telegramToken?.trim()) {
-        extra += await configureChannel("telegram", {
-          addArgs: ["--token", payload.telegramToken.trim()],
-          configWrites: [
-            { path: "channels.telegram.enabled", value: "true" },
-            { path: "channels.telegram.dmPolicy", value: "pairing" },
-            { path: "channels.telegram.groupPolicy", value: "allowlist" },
-            { path: "channels.telegram.accounts.default.groupPolicy", value: "allowlist" },
-            { path: "channels.telegram.streaming", value: "partial" },
-            {
-              path: "channels.telegram.groups",
-              value: {},
-              json: true,
-            },
-            {
-              path: "channels.telegram.accounts.default.groups",
-              value: {},
-              json: true,
-            },
-            {
-              path: "channels.telegram.threadBindings",
-              value: {
-                enabled: true,
-                spawnAcpSessions: true,
-              },
-              json: true,
-            },
-          ],
-        });
-      }
-
-      if (payload.discordToken?.trim()) {
-        extra += await configureChannel("discord", {
-          addArgs: ["--token", payload.discordToken.trim()],
-          configWrites: [
-            { path: "channels.discord.enabled", value: "true" },
-            { path: "channels.discord.dmPolicy", value: "pairing" },
-            { path: "channels.discord.groupPolicy", value: "allowlist" },
-            {
-              path: "channels.discord.channels",
-              value: {},
-              json: true,
-            },
-            {
-              path: "channels.discord.threadBindings",
-              value: {
-                enabled: true,
-                spawnAcpSessions: true,
-              },
-              json: true,
-            },
-          ],
-        });
-      }
-
-      if (payload.slackBotToken?.trim() || payload.slackAppToken?.trim()) {
-        const addArgs = [];
-        if (payload.slackBotToken?.trim()) {
-          addArgs.push("--bot-token", payload.slackBotToken.trim());
-        }
-        if (payload.slackAppToken?.trim()) {
-          addArgs.push("--app-token", payload.slackAppToken.trim());
-        }
-        extra += await configureChannel("slack", {
-          addArgs,
-          configWrites: [
-            { path: "channels.slack.enabled", value: "true" },
-            { path: "channels.slack.dmPolicy", value: "pairing" },
-            { path: "channels.slack.groupPolicy", value: "allowlist" },
-            {
-              path: "channels.slack.channels",
-              value: {},
-              json: true,
-            },
-          ],
-        });
-      }
+      extra += await applyRequestedModel(resolvedModel);
+      extra += await configureRequestedChannels(payload);
 
       const doctor = await runDoctorFix(
         "Normalizing fresh setup before first gateway start",
