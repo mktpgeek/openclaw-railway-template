@@ -1551,6 +1551,11 @@ async function configureChannel(name, { addArgs = [], configWrites = [] } = {}) 
       clawArgs(["channels", "add", "--channel", name, ...addArgs]),
     );
     output += `\n[channels add ${name}] exit=${addResult.code}\n${addResult.output || "(no output)"}\n`;
+    if (addResult.code !== 0) {
+      throw new Error(
+        `Channel setup failed for ${name}.\n${output}`.trim(),
+      );
+    }
   }
 
   for (const write of configWrites) {
@@ -1559,6 +1564,11 @@ async function configureChannel(name, { addArgs = [], configWrites = [] } = {}) 
       : ["config", "set", write.path, String(write.value)];
     const result = await runCmd(OPENCLAW_NODE, clawArgs(args));
     output += `[config set ${write.path}] exit=${result.code}\n${result.output || "(no output)"}\n`;
+    if (result.code !== 0) {
+      throw new Error(
+        `Channel config write failed for ${name} at ${write.path}.\n${output}`.trim(),
+      );
+    }
   }
 
   const getResult = await runCmd(
@@ -1566,6 +1576,11 @@ async function configureChannel(name, { addArgs = [], configWrites = [] } = {}) 
     clawArgs(["config", "get", `channels.${name}`]),
   );
   output += `[${name} verify] exit=${getResult.code}\n${getResult.output || "(no output)"}`;
+  if (getResult.code !== 0) {
+    throw new Error(
+      `Channel verification failed for ${name}.\n${output}`.trim(),
+    );
+  }
 
   return output;
 }
@@ -1653,6 +1668,11 @@ function validatePayload(payload) {
     if (payload[field] !== undefined && typeof payload[field] !== "string") {
       return `Invalid ${field}: must be a string`;
     }
+  }
+  const slackBotToken = payload.slackBotToken?.trim() || "";
+  const slackAppToken = payload.slackAppToken?.trim() || "";
+  if (Boolean(slackBotToken) !== Boolean(slackAppToken)) {
+    return "Slack setup requires both the bot token and the app token.";
   }
   return null;
 }
@@ -1784,6 +1804,42 @@ async function repairAcpRuntimeConfig(reason = "Repairing ACP runtime config") {
 
 async function enableAcpOnConfiguredInstance() {
   let output = "";
+  output += "\n[setup] Re-applying gateway settings for existing instance...\n";
+
+  const allowInsecureResult = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs([
+      "config",
+      "set",
+      "gateway.controlUi.allowInsecureAuth",
+      "false",
+    ]),
+  );
+  output += `[config] gateway.controlUi.allowInsecureAuth=false exit=${allowInsecureResult.code}\n`;
+
+  const tokenResult = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs([
+      "config",
+      "set",
+      "gateway.auth.token",
+      OPENCLAW_GATEWAY_TOKEN,
+    ]),
+  );
+  output += `[config] gateway.auth.token exit=${tokenResult.code}\n`;
+
+  const proxiesResult = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs([
+      "config",
+      "set",
+      "--json",
+      "gateway.trustedProxies",
+      '["127.0.0.1"]',
+    ]),
+  );
+  output += `[config] gateway.trustedProxies exit=${proxiesResult.code}\n`;
+
   output += await configureAcpSupport();
   const authRepair = await repairModelAuth(
     "Repairing placeholder provider auth before ACP restart",
