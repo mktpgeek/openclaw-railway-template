@@ -35,6 +35,9 @@
       loading: false,
       pairingChannel: '',
       pairingCode: '',
+      pairingsLoading: false,
+      pairingRequests: [],
+      pairingErrors: [],
       showPairingModal: false,
       isReady: false,
       tuiEnabled: false,
@@ -97,6 +100,14 @@
 
       get selectedAuthNeedsSecret() {
         return this.authChoiceNeedsSecret(this.selectedAuth);
+      },
+
+      get hasSlackConfig() {
+        return Boolean(this.slackBotToken.trim() && this.slackAppToken.trim());
+      },
+
+      get hasPartialSlackConfig() {
+        return Boolean(this.slackBotToken.trim()) !== Boolean(this.slackAppToken.trim());
       },
 
       get selectedAuthNoSecretHint() {
@@ -182,6 +193,13 @@
       },
 
       async runSetup() {
+        if (this.hasPartialSlackConfig) {
+          const msg = 'Slack setup needs both the Bot token and the App token.';
+          this.log = 'Error: ' + msg + '\n';
+          alert(msg);
+          return;
+        }
+
         const payload = {
           authChoice: this.selectedAuth,
           authSecret: this.selectedAuthNeedsSecret ? this.authSecret : '',
@@ -219,16 +237,40 @@
         }
       },
 
-      openPairingModal() {
+      async openPairingModal() {
         this.pairingChannel = '';
         this.pairingCode = '';
+        this.pairingRequests = [];
+        this.pairingErrors = [];
         this.showPairingModal = true;
+        await this.loadPairings();
+      },
+
+      async loadPairings() {
+        this.pairingsLoading = true;
+        try {
+          const j = await this.httpJson('/setup/api/pairings');
+          this.pairingRequests = Array.isArray(j.requests) ? j.requests : [];
+          this.pairingErrors = Array.isArray(j.errors) ? j.errors : [];
+        } catch (e) {
+          this.pairingRequests = [];
+          this.pairingErrors = [{ channel: 'setup', output: String(e) }];
+          this.log += '✗ Failed to load pending pairings: ' + String(e) + '\n';
+        } finally {
+          this.pairingsLoading = false;
+        }
+      },
+
+      async approvePairingRequest(channel, code) {
+        this.pairingChannel = channel;
+        this.pairingCode = code;
+        await this.approvePairing();
       },
 
       async approvePairing() {
         const channel = this.pairingChannel.trim().toLowerCase();
-        if (channel !== 'telegram' && channel !== 'discord') {
-          alert('Channel must be "telegram" or "discord"');
+        if (channel !== 'telegram' && channel !== 'discord' && channel !== 'slack') {
+          alert('Channel must be "telegram", "discord", or "slack"');
           return;
         }
         const code = this.pairingCode.trim();
@@ -236,7 +278,6 @@
           alert('Please enter a pairing code');
           return;
         }
-        this.showPairingModal = false;
         this.log += '\nApproving pairing for ' + channel + '...\n';
 
         try {
@@ -252,6 +293,7 @@
           if (result.ok) {
             const msg = result.output || 'Pairing approved successfully';
             this.log += '✓ ' + msg + '\n';
+            await this.loadPairings();
             alert('✓ ' + msg.trim());
           } else {
             const msg = result.output || result.error || 'Unknown error';
@@ -602,7 +644,7 @@
               </div>
               <span class="action-title">Approve Channel Access</span>
             </div>
-            <p class="action-desc">Grant DM access to users who have requested access on Telegram or Discord.</p>
+            <p class="action-desc">Grant DM access to users who have requested access on Slack, Telegram, or Discord.</p>
             <button @click="openPairingModal()" :disabled="loading" class="action-btn">
               Approve Channel Access
             </button>
@@ -822,6 +864,9 @@
               </div>
               <input x-model="slackBotToken" type="password" placeholder="Bot token (xoxb-...)" class="input" />
               <input x-model="slackAppToken" type="password" placeholder="App token (xapp-...)" class="input" style="margin-top:0.75rem" />
+              <p class="form-hint">Slack Socket Mode requires both tokens. Leave both blank to skip Slack for now.</p>
+              <p class="form-hint">Slack DMs use pairing by default, and channel messages are allowlist-only until you explicitly open or allowlist a Slack channel.</p>
+              <p x-show="hasPartialSlackConfig" class="form-hint" style="color:#dc2626">Enter both the Bot token and App token, or clear both fields.</p>
             </div>
           </div>
         </div>
@@ -852,8 +897,8 @@
                 <dd>
                   <span x-show="telegramToken" class="badge badge-sky">Telegram</span>
                   <span x-show="discordToken" class="badge badge-indigo">Discord</span>
-                  <span x-show="slackBotToken && slackAppToken" class="badge badge-green">Slack</span>
-                  <span x-show="!telegramToken && !discordToken && !(slackBotToken && slackAppToken)" class="text-muted">None</span>
+                  <span x-show="hasSlackConfig" class="badge badge-green">Slack</span>
+                  <span x-show="!telegramToken && !discordToken && !hasSlackConfig" class="text-muted">None</span>
                 </dd>
               </div>
               <div class="config-row">
@@ -987,20 +1032,69 @@
     </div>
 
     <div x-show="showPairingModal" x-cloak class="modal-overlay" @click.self="showPairingModal = false">
-      <div class="modal-card modal-sm">
-        <h3 class="modal-title mb-4">Approve Channel Access</h3>
+      <div class="modal-card modal-md">
+        <h3 class="modal-title mb-4">Approve DM Pairing</h3>
+        <div class="section-block" style="margin-bottom:1rem">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;margin-bottom:0.75rem">
+            <p class="label" style="margin:0">Pending Requests</p>
+            <button @click="loadPairings()" :disabled="pairingsLoading" class="btn btn-secondary" style="padding:0.5rem 0.75rem;font-size:0.75rem">
+              <span x-show="!pairingsLoading">Refresh</span>
+              <span x-show="pairingsLoading">Refreshing...</span>
+            </button>
+          </div>
+          <div x-show="pairingsLoading" class="text-sm text-muted">Loading pending pairing requests...</div>
+          <div x-show="!pairingsLoading && pairingRequests.length === 0" class="text-sm text-muted">No pending DM pairing requests right now. Send the first DM to the bot, then reopen this dialog.</div>
+          <div x-show="!pairingsLoading && pairingRequests.length > 0" style="display:grid;gap:0.75rem">
+            <template x-for="request in pairingRequests" :key="request.channel + ':' + request.code">
+              <div class="section-block" style="margin:0">
+                <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:0.75rem">
+                  <div>
+                    <p class="label" style="margin-bottom:0.35rem" x-text="request.channel.toUpperCase() + ' · ' + request.code"></p>
+                    <p class="text-sm text-muted" style="margin:0 0 0.35rem 0">
+                      Sender:
+                      <span x-text="request.id || 'unknown'"></span>
+                    </p>
+                    <p class="text-sm text-muted" style="margin:0" x-show="request.createdAt">
+                      Requested:
+                      <span x-text="request.createdAt"></span>
+                    </p>
+                  </div>
+                  <button
+                    @click="approvePairingRequest(request.channel, request.code)"
+                    :disabled="pairingsLoading"
+                    class="btn btn-primary"
+                    style="margin-top:0"
+                  >
+                    Approve
+                  </button>
+                </div>
+              </div>
+            </template>
+          </div>
+          <div x-show="pairingErrors.length > 0" style="display:grid;gap:0.5rem;margin-top:0.75rem">
+            <template x-for="error in pairingErrors" :key="error.channel">
+              <p class="text-sm text-muted" style="margin:0">
+                Could not load
+                <span x-text="error.channel"></span>
+                pairings.
+              </p>
+            </template>
+          </div>
+        </div>
         <div class="form-group">
           <label class="label">Channel</label>
           <select x-model="pairingChannel" class="select">
             <option value="">Select channel...</option>
             <option value="telegram">Telegram</option>
             <option value="discord">Discord</option>
+            <option value="slack">Slack</option>
           </select>
         </div>
         <div class="form-group">
           <label class="label">Pairing Code</label>
           <input x-model="pairingCode" type="text" placeholder="e.g. 3EY4PUYS" class="input" />
         </div>
+        <p class="text-sm text-muted mb-4">Use this for direct-message pairing codes. Slack channels still need to be explicitly opened or allowlisted.</p>
         <div class="btn-pair">
           <button @click="approvePairing()" class="btn btn-primary">Approve</button>
           <button @click="showPairingModal = false" class="btn btn-close-full" style="margin-top:0">Cancel</button>

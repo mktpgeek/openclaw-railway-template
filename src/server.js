@@ -1641,6 +1641,40 @@ async function configureChannel(name, { addArgs = [], configWrites = [] } = {}) 
   return output;
 }
 
+async function listPendingPairingRequests(channel) {
+  const result = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs(["pairing", "list", "--channel", channel, "--json"]),
+  );
+
+  if (result.code !== 0) {
+    return {
+      ok: false,
+      channel,
+      requests: [],
+      output: result.output || "",
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(result.output || "{}");
+    const requests = Array.isArray(parsed?.requests) ? parsed.requests : [];
+    return {
+      ok: true,
+      channel,
+      requests,
+      output: result.output || "",
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      channel,
+      requests: [],
+      output: `${result.output || ""}\n[parse error] ${String(err)}`.trim(),
+    };
+  }
+}
+
 const VALID_AUTH_CHOICES = [
   "apiKey",
   "openai-api-key",
@@ -2165,6 +2199,42 @@ app.post("/setup/api/pairing/approve", requireSetupAuth, async (req, res) => {
   return res
     .status(r.code === 0 ? 200 : 500)
     .json({ ok: r.code === 0, output: r.output });
+});
+
+app.get("/setup/api/pairings", requireSetupAuth, async (_req, res) => {
+  const channels = ["telegram", "discord", "slack"];
+  const results = await Promise.all(
+    channels.map((channel) => listPendingPairingRequests(channel)),
+  );
+
+  const requests = results
+    .flatMap((result) =>
+      result.requests.map((request) => ({
+        channel: result.channel,
+        code: request?.code ?? "",
+        id: request?.id ?? "",
+        meta: request?.meta ?? null,
+        createdAt: request?.createdAt ?? "",
+      })),
+    )
+    .sort((a, b) => {
+      const aTime = Date.parse(a.createdAt || "") || 0;
+      const bTime = Date.parse(b.createdAt || "") || 0;
+      return bTime - aTime;
+    });
+
+  const errors = results
+    .filter((result) => !result.ok)
+    .map((result) => ({
+      channel: result.channel,
+      output: result.output,
+    }));
+
+  return res.status(errors.length === 0 ? 200 : 207).json({
+    ok: errors.length === 0,
+    requests,
+    errors,
+  });
 });
 
 app.post("/setup/api/reset", requireSetupAuth, async (_req, res) => {
