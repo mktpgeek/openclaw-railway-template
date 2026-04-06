@@ -1542,6 +1542,62 @@ async function runDoctorFix(reason = "Repairing config and state") {
   };
 }
 
+async function repairLegacyTemplateConfig(
+  reason = "Repairing legacy template config",
+) {
+  let output = `[config repair] ${reason}\n`;
+  const config = readConfig();
+  if (!config || typeof config !== "object") {
+    output += "[config repair] skipped (config missing or unreadable)\n";
+    return { ok: true, changed: false, output };
+  }
+
+  let changed = false;
+
+  const slackChannels = config?.channels?.slack?.channels;
+  if (slackChannels && typeof slackChannels === "object") {
+    for (const [channelId, channelConfig] of Object.entries(slackChannels)) {
+      if (!channelConfig || typeof channelConfig !== "object") {
+        continue;
+      }
+      if (!Object.prototype.hasOwnProperty.call(channelConfig, "allow")) {
+        continue;
+      }
+      if (!Object.prototype.hasOwnProperty.call(channelConfig, "enabled")) {
+        channelConfig.enabled = channelConfig.allow === true;
+      }
+      delete channelConfig.allow;
+      changed = true;
+      output += `[config repair] migrated channels.slack.channels.${channelId}.allow -> enabled\n`;
+    }
+  }
+
+  const acpxConfig = config?.plugins?.entries?.acpx?.config;
+  if (
+    acpxConfig &&
+    typeof acpxConfig === "object" &&
+    Object.prototype.hasOwnProperty.call(acpxConfig, "pluginToolsMcpBridge")
+  ) {
+    delete acpxConfig.pluginToolsMcpBridge;
+    changed = true;
+    output += "[config repair] removed plugins.entries.acpx.config.pluginToolsMcpBridge\n";
+  }
+
+  if (!changed) {
+    output += "[config repair] no legacy template keys found\n";
+    return { ok: true, changed: false, output };
+  }
+
+  try {
+    writeJsonFile(configPath(), config);
+    output += `[config repair] wrote ${configPath()}\n`;
+    return { ok: true, changed: true, output };
+  } catch (err) {
+    output += `[config repair] write failed: ${err.message}\n`;
+    return { ok: false, changed: false, output };
+  }
+}
+
 async function configureChannel(name, { addArgs = [], configWrites = [] } = {}) {
   let output = "";
 
@@ -1730,12 +1786,6 @@ async function configureAcpSupport() {
     [
       "config",
       "set",
-      "plugins.entries.acpx.config.pluginToolsMcpBridge",
-      ACP_PLUGIN_TOOLS_MCP_BRIDGE ? "true" : "false",
-    ],
-    [
-      "config",
-      "set",
       "plugins.entries.acpx.config.command",
       ACP_COMMAND,
     ],
@@ -1767,6 +1817,21 @@ async function configureAcpSupport() {
 async function repairAcpRuntimeConfig(reason = "Repairing ACP runtime config") {
   let output = `[acp runtime repair] ${reason}\n`;
   let changed = false;
+
+  const legacyConfigRepair = await repairLegacyTemplateConfig(
+    "Removing stale ACPX/template config keys before ACP runtime repair",
+  );
+  output += `${legacyConfigRepair.output}`;
+  if (!legacyConfigRepair.ok) {
+    return {
+      ok: false,
+      changed,
+      output,
+    };
+  }
+  if (legacyConfigRepair.changed) {
+    changed = true;
+  }
 
   for (const [pathKey, value] of [
     ["plugins.entries.acpx.config.command", ACP_COMMAND],
@@ -1805,6 +1870,11 @@ async function repairAcpRuntimeConfig(reason = "Repairing ACP runtime config") {
 async function enableAcpOnConfiguredInstance() {
   let output = "";
   output += "\n[setup] Re-applying gateway settings for existing instance...\n";
+
+  const legacyConfigRepair = await repairLegacyTemplateConfig(
+    "Repairing existing instance before applying runtime fixes",
+  );
+  output += `${legacyConfigRepair.output}`;
 
   const allowInsecureResult = await runCmd(
     OPENCLAW_NODE,
@@ -1858,7 +1928,6 @@ async function enableAcpOnConfiguredInstance() {
 app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
   try {
     if (isConfigured()) {
-      await ensureGatewayRunning();
       return res.json({
         ok: true,
         output:
@@ -2578,6 +2647,14 @@ const server = app.listen(PORT, () => {
   if (isConfigured()) {
     (async () => {
       try {
+        log.info(
+          "wrapper",
+          "repairing legacy template config before gateway boot...",
+        );
+        const legacyRepair = await repairLegacyTemplateConfig(
+          "Startup repair for legacy template config",
+        );
+        log.info("wrapper", legacyRepair.output.trimEnd());
         log.info(
           "wrapper",
           "running openclaw doctor --fix --non-interactive --yes...",
