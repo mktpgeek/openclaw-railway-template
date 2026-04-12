@@ -195,3 +195,36 @@ This avoids repeatedly reading large files and provides instant context about th
 5. **Gateway spawn inherits stdio** → logs appear in wrapper output (src/server.js:134)
 6. **WebSocket auth requires proxy event handlers** → Direct `req.headers` modification doesn't work for WebSocket upgrades with http-proxy; must use `proxyReqWs` event (src/server.js:741) to reliably inject Authorization header
 7. **Control UI requires allowInsecureAuth to bypass pairing** → Set `gateway.controlUi.allowInsecureAuth=true` during onboarding to prevent "disconnected (1008): pairing required" errors (GitHub issue #2284). Wrapper already handles bearer token auth, so device pairing is unnecessary.
+
+## Debugging & Upgrade Workflow
+
+### Claude Code Skills
+
+Two custom skills are available for diagnosing and upgrading OpenClaw:
+
+- **`/openclaw-debug`** — Structured diagnostic workflow: runs smoke tests against your live Railway deployment, checks health endpoints, fetches logs, runs doctor, and reports findings with recommendations.
+- **`/openclaw-upgrade [version]`** — Upgrades the OpenClaw version pin in the Dockerfile. Checks the CHANGELOG for breaking changes, applies the edit, and prompts for post-deploy smoke testing.
+
+### Smoke Test Script
+
+Test a live Railway deployment with:
+
+```bash
+bash scripts/smoke-test.sh <RAILWAY_URL> <SETUP_PASSWORD> [expected-version]
+```
+
+Checks `/healthz`, `/setup/healthz`, `/setup/api/debug`, `/setup/api/status`, gateway proxy reachability, and optionally verifies the deployed OpenClaw version matches expectations.
+
+### Knowledge Base
+
+`.claude/memory/openclaw-reference.md` contains the OpenClaw CLI command reference, health endpoint schemas, common error codes with fixes, a troubleshooting flowchart, and a breaking changes checklist for upgrades. Read this before debugging.
+
+### Context7 MCP
+
+`.claude/settings.json` configures the Context7 MCP server for live OpenClaw documentation lookup during debug sessions.
+
+### Quick Debug Sequence
+
+```bash
+openclaw status → openclaw gateway status --deep → check logs → openclaw doctor --fix → openclaw channels status --probe
+```
