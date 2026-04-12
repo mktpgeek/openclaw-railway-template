@@ -1573,14 +1573,21 @@ async function repairLegacyTemplateConfig(
   }
 
   const acpxConfig = config?.plugins?.entries?.acpx?.config;
-  if (
-    acpxConfig &&
-    typeof acpxConfig === "object" &&
-    Object.prototype.hasOwnProperty.call(acpxConfig, "pluginToolsMcpBridge")
-  ) {
-    delete acpxConfig.pluginToolsMcpBridge;
-    changed = true;
-    output += "[config repair] removed plugins.entries.acpx.config.pluginToolsMcpBridge\n";
+  if (acpxConfig && typeof acpxConfig === "object") {
+    const staleKeys = [
+      "pluginToolsMcpBridge",
+      "permissionMode",
+      "nonInteractivePermissions",
+      "command",
+      "expectedVersion",
+    ];
+    for (const key of staleKeys) {
+      if (Object.prototype.hasOwnProperty.call(acpxConfig, key)) {
+        delete acpxConfig[key];
+        changed = true;
+        output += `[config repair] removed plugins.entries.acpx.config.${key}\n`;
+      }
+    }
   }
 
   if (!changed) {
@@ -1901,6 +1908,17 @@ async function configureAcpSupport() {
     ["config", "set", "session.threadBindings.enabled", "true"],
     ["config", "set", "session.threadBindings.idleHours", "24"],
     ["config", "set", "session.threadBindings.maxAgeHours", "0"],
+  ];
+
+  for (const args of configWrites) {
+    const result = await runCmd(OPENCLAW_NODE, clawArgs(args));
+    output += `[${args.slice(0, 3).join(" ")} ${args[3]}] exit=${result.code}\n`;
+    if (result.output) {
+      output += `${result.output}\n`;
+    }
+  }
+
+  const acpxPluginConfigWrites = [
     [
       "config",
       "set",
@@ -1927,11 +1945,14 @@ async function configureAcpSupport() {
     ],
   ];
 
-  for (const args of configWrites) {
+  for (const args of acpxPluginConfigWrites) {
     const result = await runCmd(OPENCLAW_NODE, clawArgs(args));
     output += `[${args.slice(0, 3).join(" ")} ${args[3]}] exit=${result.code}\n`;
     if (result.output) {
       output += `${result.output}\n`;
+    }
+    if (result.code !== 0) {
+      output += `[warning] ${args[3]} rejected by schema — skipping (property may have been removed in this OpenClaw version)\n`;
     }
   }
 
@@ -2284,6 +2305,9 @@ app.post("/setup/api/reset", requireSetupAuth, async (_req, res) => {
 });
 
 app.post("/setup/api/doctor", requireSetupAuth, async (_req, res) => {
+  const legacyRepair = await repairLegacyTemplateConfig(
+    "Pre-doctor repair for legacy template config",
+  );
   const result = await runDoctorFix("Manual repair from setup UI");
   const acpRepair = await repairAcpRuntimeConfig(
     "Repairing ACP runtime config from setup UI",
@@ -2291,9 +2315,10 @@ app.post("/setup/api/doctor", requireSetupAuth, async (_req, res) => {
   const authRepair = await repairModelAuth(
     "Repairing placeholder provider auth from setup UI",
   );
-  return res.status(result.ok && acpRepair.ok && authRepair.ok ? 200 : 500).json({
-    ok: result.ok && acpRepair.ok && authRepair.ok,
-    output: `${result.output}\n${acpRepair.output}\n${authRepair.output}`,
+  const allOk = result.ok && acpRepair.ok && authRepair.ok;
+  return res.status(allOk ? 200 : 500).json({
+    ok: allOk,
+    output: `${legacyRepair.output}\n${result.output}\n${acpRepair.output}\n${authRepair.output}`,
   });
 });
 
