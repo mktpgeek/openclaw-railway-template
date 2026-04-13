@@ -1,6 +1,7 @@
 import childProcess from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -623,6 +624,52 @@ let gmailWatcherRestartCount = 0;
 let gmailWatcherLastStartTime = 0;
 let intentionalGmailWatcherRestart = false;
 let gmailWatcherConfigSignature = null;
+
+// Short-lived cache of whether the Gmail watcher is accepting connections on
+// its local port. Used by the /gmail-pubsub fast-fail path so Google Pub/Sub
+// pushes don't hold sockets open waiting for ECONNREFUSED, which under retry
+// amplification can exhaust the container's PID/FD limits and take down the
+// wrapper.
+const GMAIL_WATCHER_REACHABLE_CACHE_MS = 2_000;
+const GMAIL_WATCHER_REACHABLE_PROBE_TIMEOUT_MS = 250;
+let gmailWatcherReachableCache = { ok: false, expiresAt: 0 };
+
+async function isGmailWatcherReachable() {
+  const now = Date.now();
+  if (now < gmailWatcherReachableCache.expiresAt) {
+    return gmailWatcherReachableCache.ok;
+  }
+  const ok = await new Promise((resolve) => {
+    let settled = false;
+    const socket = net.createConnection({
+      host: GMAIL_WATCHER_HOST,
+      port: GMAIL_WATCHER_PORT,
+    });
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(value);
+    };
+    const timer = setTimeout(
+      () => finish(false),
+      GMAIL_WATCHER_REACHABLE_PROBE_TIMEOUT_MS,
+    );
+    socket.once("connect", () => {
+      clearTimeout(timer);
+      finish(true);
+    });
+    socket.once("error", () => {
+      clearTimeout(timer);
+      finish(false);
+    });
+  });
+  gmailWatcherReachableCache = {
+    ok,
+    expiresAt: Date.now() + GMAIL_WATCHER_REACHABLE_CACHE_MS,
+  };
+  return ok;
+}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -2710,6 +2757,23 @@ app.use(async (req, res) => {
   }
 
   if (matchesProxyBasePath(req.path, GMAIL_WATCHER_PATH)) {
+    // Google Pub/Sub retries pushes aggressively on any non-2xx response. If
+    // the watcher isn't listening, proxying to 127.0.0.1:8788 produces
+    // ECONNREFUSED per push, and the retry backlog (up to 7 days of events)
+    // hammers the wrapper — exhausting container PIDs/FDs and killing the
+    // whole service. To stay resilient, short-circuit before touching the
+    // proxy when the watcher isn't configured or isn't currently reachable.
+    if (!getGmailWatcherConfig()) {
+      // Gmail hook intentionally not configured. 204-ack so Pub/Sub drops
+      // the message instead of building an unbounded retry queue.
+      return res.status(204).end();
+    }
+    if (!(await isGmailWatcherReachable())) {
+      // Gmail hook IS configured but the watcher isn't up yet (gateway
+      // starting / restart / transient). Fail fast with 503 so Pub/Sub
+      // backs off and retries later, without holding a socket open.
+      return res.status(503).end();
+    }
     try {
       if (MANAGE_GMAIL_WATCHER) {
         await ensureGmailWatcherRunning();
