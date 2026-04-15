@@ -138,8 +138,6 @@ const ACP_DEFAULT_AGENT =
   process.env.OPENCLAW_ACP_DEFAULT_AGENT?.trim() || "codex";
 const ACP_PERMISSION_MODE =
   process.env.OPENCLAW_ACP_PERMISSION_MODE?.trim() || "approve-all";
-const ACP_NON_INTERACTIVE_PERMISSIONS =
-  process.env.OPENCLAW_ACP_NON_INTERACTIVE_PERMISSIONS?.trim() || "deny";
 const ACP_PLUGIN_TOOLS_MCP_BRIDGE =
   process.env.OPENCLAW_ACP_PLUGIN_TOOLS_MCP_BRIDGE?.toLowerCase() === "true";
 const ACP_MAX_CONCURRENT_SESSIONS = Number.parseInt(
@@ -150,10 +148,6 @@ const ACP_RUNTIME_TTL_MINUTES = Number.parseInt(
   process.env.OPENCLAW_ACP_RUNTIME_TTL_MINUTES ?? "120",
   10,
 );
-const ACP_EXPECTED_VERSION =
-  process.env.OPENCLAW_ACP_EXPECTED_VERSION?.trim() || "0.4.1";
-const ACP_COMMAND =
-  process.env.OPENCLAW_ACP_COMMAND?.trim() || "/usr/local/bin/acpx";
 const CODEX_CLI_VERSION =
   process.env.OPENCLAW_CODEX_CLI_VERSION?.trim() || "0.118.0";
 const RAILWAY_VOLUME_PATH =
@@ -222,10 +216,6 @@ function isConfigured() {
   } catch {
     return false;
   }
-}
-
-function isPlaceholderCredential(value) {
-  return String(value ?? "").trim() === "not-needed";
 }
 
 function isDummyCredential(value) {
@@ -391,22 +381,22 @@ function getCodexAuthStatus() {
   const envOpenAiKey = process.env.OPENAI_API_KEY?.trim() || "";
   const envCodexKey = process.env.CODEX_API_KEY?.trim() || "";
   const effectiveKey =
-    (!isPlaceholderCredential(envCodexKey) && envCodexKey) ||
-    (!isPlaceholderCredential(envOpenAiKey) && envOpenAiKey) ||
-    (!isPlaceholderCredential(fileKey) && fileKey) ||
+    (!isDummyCredential(envCodexKey) && envCodexKey) ||
+    (!isDummyCredential(envOpenAiKey) && envOpenAiKey) ||
+    (!isDummyCredential(fileKey) && fileKey) ||
     "";
 
   return {
     authPath: CODEX_AUTH_PATH,
     fileAuthMode,
-    envOpenAiPlaceholder: isPlaceholderCredential(envOpenAiKey),
-    envCodexPlaceholder: isPlaceholderCredential(envCodexKey),
-    filePlaceholder: isPlaceholderCredential(fileKey),
+    envOpenAiPlaceholder: isDummyCredential(envOpenAiKey),
+    envCodexPlaceholder: isDummyCredential(envCodexKey),
+    filePlaceholder: isDummyCredential(fileKey),
     hasOauthTokens,
     hasPlaceholderOnly: !Boolean(effectiveKey || hasOauthTokens) && Boolean(
-      isPlaceholderCredential(fileKey) ||
-      isPlaceholderCredential(envOpenAiKey) ||
-      isPlaceholderCredential(envCodexKey)
+      isDummyCredential(fileKey) ||
+      isDummyCredential(envOpenAiKey) ||
+      isDummyCredential(envCodexKey)
     ),
     hasUsableCredential: Boolean(effectiveKey || hasOauthTokens),
   };
@@ -509,12 +499,12 @@ function buildChildEnv(extra = {}, opts = {}) {
   };
 
   for (const key of ["OPENAI_API_KEY", "CODEX_API_KEY"]) {
-    if (isPlaceholderCredential(env[key])) {
+    if (isDummyCredential(env[key])) {
       delete env[key];
       if (!quiet) {
         log.warn(
           "env",
-          `${key}=not-needed removed from child process environment; ACP harnesses need a real key or CLI login`,
+          `${key} placeholder removed from child process environment; child runtimes need a real key or CLI login`,
         );
       }
     }
@@ -569,7 +559,7 @@ async function ensureCodexCliSupport() {
 
   if (!auth.hasUsableCredential) {
     output +=
-      "[codex auth] Codex ACP on Railway needs a real OPENAI_API_KEY or CODEX_API_KEY. The placeholder value 'not-needed' is not usable.\n";
+      "[codex auth] Codex ACP on Railway needs a real OPENAI_API_KEY or CODEX_API_KEY. Placeholder values like 'not-needed' or 'dummy' are not usable.\n";
   }
 
   return output;
@@ -1518,7 +1508,7 @@ function validateProviderSecret(authChoice, rawSecret) {
   }
 
   if (authChoice === "openai-api-key") {
-    return "Invalid OpenAI API key: placeholder values like 'not-needed' are not valid. Use a real OpenAI API key, or choose 'OpenAI Codex (ChatGPT OAuth)' instead.";
+    return "Invalid OpenAI API key: placeholder values like 'not-needed' or 'dummy' are not valid. Use a real OpenAI API key, or choose 'OpenAI Codex (ChatGPT OAuth)' instead.";
   }
 
   return "Invalid provider credential: placeholder values like 'not-needed' or 'dummy' are not valid setup credentials.";
@@ -1969,43 +1959,7 @@ async function configureAcpSupport() {
     }
   }
 
-  const acpxPluginConfigWrites = [
-    [
-      "config",
-      "set",
-      "plugins.entries.acpx.config.permissionMode",
-      ACP_PERMISSION_MODE,
-    ],
-    [
-      "config",
-      "set",
-      "plugins.entries.acpx.config.nonInteractivePermissions",
-      ACP_NON_INTERACTIVE_PERMISSIONS,
-    ],
-    [
-      "config",
-      "set",
-      "plugins.entries.acpx.config.command",
-      ACP_COMMAND,
-    ],
-    [
-      "config",
-      "set",
-      "plugins.entries.acpx.config.expectedVersion",
-      ACP_EXPECTED_VERSION,
-    ],
-  ];
-
-  for (const args of acpxPluginConfigWrites) {
-    const result = await runCmd(OPENCLAW_NODE, clawArgs(args));
-    output += `[${args.slice(0, 3).join(" ")} ${args[3]}] exit=${result.code}\n`;
-    if (result.output) {
-      output += `${result.output}\n`;
-    }
-    if (result.code !== 0) {
-      output += `[warning] ${args[3]} rejected by schema — skipping (property may have been removed in this OpenClaw version)\n`;
-    }
-  }
+  output += "[acpx config] bundled ACPX runtime manages its own schema; skipping legacy template config writes\n";
 
   const pluginDoctorResult = await runCmd(
     OPENCLAW_NODE,
@@ -2035,32 +1989,7 @@ async function repairAcpRuntimeConfig(reason = "Repairing ACP runtime config") {
     changed = true;
   }
 
-  for (const [pathKey, value] of [
-    ["plugins.entries.acpx.config.command", ACP_COMMAND],
-    ["plugins.entries.acpx.config.expectedVersion", ACP_EXPECTED_VERSION],
-  ]) {
-    const current = await runCmd(
-      OPENCLAW_NODE,
-      clawArgs(["config", "get", pathKey]),
-    );
-    const currentValue = current.output.trim();
-    if (current.code === 0 && currentValue === value) {
-      output += `[config get ${pathKey}] ok (${currentValue})\n`;
-      continue;
-    }
-
-    const result = await runCmd(
-      OPENCLAW_NODE,
-      clawArgs(["config", "set", pathKey, value]),
-    );
-    output += `[config set ${pathKey}] exit=${result.code}\n`;
-    if (result.output) {
-      output += `${result.output}\n`;
-    }
-    if (result.code === 0) {
-      changed = true;
-    }
-  }
+  output += "[acp runtime repair] bundled ACPX runtime no longer accepts legacy template plugin config keys; leaving plugins.entries.acpx.config empty\n";
 
   return {
     ok: true,
