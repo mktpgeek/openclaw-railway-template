@@ -157,9 +157,6 @@
             this.selectedGroup = this.authGroups[0].value;
             this.updateAuthChoices();
           }
-          if (j.channelsAddHelp && j.channelsAddHelp.indexOf('telegram') === -1) {
-            this.log += '\nNote: this openclaw build does not list telegram in `channels add --help`. Telegram auto-add will be skipped.\n';
-          }
           this.isReady = true;
         } catch (e) {
           this.status = 'Error: ' + String(e);

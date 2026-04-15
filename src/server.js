@@ -95,18 +95,12 @@ const OPENCLAW_GATEWAY_TOKEN = resolveGatewayToken();
 process.env.OPENCLAW_GATEWAY_TOKEN = OPENCLAW_GATEWAY_TOKEN;
 
 let cachedOpenclawVersion = null;
-let cachedChannelsHelp = null;
-
 async function getOpenclawInfo() {
   if (!cachedOpenclawVersion) {
-    const [version, channelsHelp] = await Promise.all([
-      runCmd(OPENCLAW_NODE, clawArgs(["--version"])),
-      runCmd(OPENCLAW_NODE, clawArgs(["channels", "add", "--help"])),
-    ]);
+    const version = await runCmd(OPENCLAW_NODE, clawArgs(["--version"]));
     cachedOpenclawVersion = version.output.trim();
-    cachedChannelsHelp = channelsHelp.output;
   }
-  return { version: cachedOpenclawVersion, channelsHelp: cachedChannelsHelp };
+  return { version: cachedOpenclawVersion };
 }
 
 const INTERNAL_GATEWAY_PORT = Number.parseInt(
@@ -1170,7 +1164,7 @@ app.get("/setup", requireSetupAuth, (_req, res) => {
 });
 
 app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
-  const { version, channelsHelp } = await getOpenclawInfo();
+  const { version } = await getOpenclawInfo();
   const codexVersion = await runCmd("codex", ["--version"]);
   const codexAuth = getCodexAuthStatus();
   const codexTrusted = isCodexWorkspaceTrusted(WORKSPACE_DIR);
@@ -1406,7 +1400,6 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
     configured: isConfigured(),
     gatewayTarget: GATEWAY_TARGET,
     openclawVersion: version,
-    channelsAddHelp: channelsHelp,
     authGroups,
     tuiEnabled: ENABLE_WEB_TUI,
     acpDefaultAgent: ACP_DEFAULT_AGENT,
@@ -1619,6 +1612,13 @@ async function repairLegacyTemplateConfig(
     }
   }
 
+  const telegramStreaming = config?.channels?.telegram?.streaming;
+  if (typeof telegramStreaming === "string" && telegramStreaming.trim()) {
+    config.channels.telegram.streaming = { mode: telegramStreaming.trim() };
+    changed = true;
+    output += "[config repair] migrated channels.telegram.streaming string -> object\n";
+  }
+
   const acpxConfig = config?.plugins?.entries?.acpx?.config;
   if (acpxConfig && typeof acpxConfig === "object") {
     const staleKeys = [
@@ -1752,7 +1752,11 @@ async function configureRequestedChannels(payload) {
         { path: "channels.telegram.dmPolicy", value: "pairing" },
         { path: "channels.telegram.groupPolicy", value: "allowlist" },
         { path: "channels.telegram.accounts.default.groupPolicy", value: "allowlist" },
-        { path: "channels.telegram.streaming", value: "partial" },
+        {
+          path: "channels.telegram.streaming",
+          value: { mode: "partial" },
+          json: true,
+        },
         {
           path: "channels.telegram.groups",
           value: {},
