@@ -20,7 +20,7 @@
 - The wrapper protects `/setup` with `SETUP_PASSWORD`.
 - During setup, the wrapper runs `openclaw onboard --non-interactive ...` inside the container, writes state to the volume, and then starts the gateway.
 - After setup, **`/` is OpenClaw**. The wrapper reverse-proxies all traffic (including WebSockets) to the local gateway process.
-- During setup, the wrapper also enables the bundled `acpx` backend, turns on ACP dispatch, configures Railway-safe non-interactive permissions, and enables Discord/Telegram ACP thread spawning when those channels are configured.
+- During setup, the wrapper also enables the bundled `acpx` backend, turns on ACP dispatch, and enables Discord/Telegram ACP thread spawning when those channels are configured.
 
 ## ACP Agents
 
@@ -29,9 +29,8 @@ This template now configures OpenClaw ACP support as part of the normal setup fl
 - Backend: `acpx`
 - Default agent: `codex` unless overridden with `OPENCLAW_ACP_DEFAULT_AGENT`
 - Allowed agents: `claude`, `codex`, `copilot`, `cursor`, `droid`, `gemini`, `iflow`, `kilocode`, `kimi`, `kiro`, `openclaw`, `opencode`, `pi`, `qwen`
-- Default permission profile: `approve-all`
-- Default non-interactive behavior: `deny`
 - Runtime command: `/usr/local/bin/acpx` baked into the image
+- ACPX runtime schema: managed by bundled OpenClaw/ACPX; the template intentionally avoids legacy `plugins.entries.acpx.config` writes
 - Codex CLI: `/usr/local/bin/codex` baked into the image
 - Codex home: persisted at `/data/.codex` by default on Railway
 - Codex workspace trust: `/data/workspace` is auto-added to `/data/.codex/config.toml`
@@ -49,8 +48,6 @@ Then try:
 /acp spawn codex --bind here
 /acp spawn claude --mode persistent --thread auto
 ```
-
-If you want ACP sessions to see installed OpenClaw plugin tools, set `OPENCLAW_ACP_PLUGIN_TOOLS_MCP_BRIDGE=true` before setup or redeploy and rerun setup.
 
 For `codex` on Railway, you still need a real `OPENAI_API_KEY` or `CODEX_API_KEY`. A placeholder like `not-needed` will let ACP boot but Codex harness sessions will fail when they try to authenticate.
 
@@ -101,13 +98,8 @@ The web TUI implements multiple security layers:
 | `TUI_IDLE_TIMEOUT_MS` | `300000` (5 min) | Closes session after inactivity |
 | `TUI_MAX_SESSION_MS` | `1800000` (30 min) | Maximum session duration |
 | `OPENCLAW_ACP_DEFAULT_AGENT` | `codex` | Default ACP harness when one is not specified |
-| `OPENCLAW_ACP_PERMISSION_MODE` | `approve-all` | ACPX permission profile for non-interactive ACP sessions |
-| `OPENCLAW_ACP_NON_INTERACTIVE_PERMISSIONS` | `deny` | Behavior when a harness would otherwise prompt |
-| `OPENCLAW_ACP_PLUGIN_TOOLS_MCP_BRIDGE` | `false` | Expose installed OpenClaw plugin tools to ACP sessions |
 | `OPENCLAW_ACP_MAX_CONCURRENT_SESSIONS` | `8` | ACP session concurrency cap |
 | `OPENCLAW_ACP_RUNTIME_TTL_MINUTES` | `120` | ACP session TTL |
-| `OPENCLAW_ACP_COMMAND` | `/usr/local/bin/acpx` | ACPX runtime command OpenClaw should launch |
-| `OPENCLAW_ACP_EXPECTED_VERSION` | `0.4.1` | Expected ACPX version |
 | `OPENCLAW_CODEX_CLI_VERSION` | `0.118.0` | Codex CLI version baked into the image / installed during ACP bootstrap |
 | `OPENCLAW_MANAGE_GMAIL_WATCHER` | `false` | Set to `true` only for older OpenClaw builds that do not manage the Gmail hook listener themselves |
 
