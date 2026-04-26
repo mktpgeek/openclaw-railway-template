@@ -164,6 +164,10 @@ const MODEL_AUTH_STORE_PATH = path.join(
   "auth-profiles.json",
 );
 const DEFAULT_OPENAI_CODEX_MODEL = "openai-codex/gpt-5.4";
+const STALE_SESSION_TMP_MAX_AGE_MS = Number.parseInt(
+  process.env.OPENCLAW_STALE_SESSION_TMP_MAX_AGE_MS ?? "600000",
+  10,
+);
 
 const ACP_ALLOWED_AGENTS = [
   "claude",
@@ -204,6 +208,134 @@ function readJsonFile(filePath) {
 function writeJsonFile(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = units[0];
+  for (let i = 1; i < units.length && value >= 1024; i += 1) {
+    value /= 1024;
+    unit = units[i];
+  }
+  return `${value.toFixed(value >= 10 || unit === "B" ? 0 : 1)} ${unit}`;
+}
+
+function getPathSize(pathToSize) {
+  const stat = fs.statSync(pathToSize);
+  if (!stat.isDirectory()) {
+    return stat.size;
+  }
+
+  let total = 0;
+  for (const entry of fs.readdirSync(pathToSize, { withFileTypes: true })) {
+    total += getPathSize(path.join(pathToSize, entry.name));
+  }
+  return total;
+}
+
+function rmPath(pathToRemove) {
+  const size = getPathSize(pathToRemove);
+  fs.rmSync(pathToRemove, { recursive: true, force: true });
+  return size;
+}
+
+function cleanupStaleSessionTempFiles() {
+  const sessionsDir = path.join(STATE_DIR, "agents", "main", "sessions");
+  const now = Date.now();
+  let removed = 0;
+  let freedBytes = 0;
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(sessionsDir, { withFileTypes: true });
+  } catch {
+    return { removed, freedBytes };
+  }
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^sessions\.json\..+\.tmp$/.test(entry.name)) {
+      continue;
+    }
+
+    const filePath = path.join(sessionsDir, entry.name);
+    try {
+      const stat = fs.statSync(filePath);
+      if (now - stat.mtimeMs < STALE_SESSION_TMP_MAX_AGE_MS) {
+        continue;
+      }
+      freedBytes += rmPath(filePath);
+      removed += 1;
+    } catch (err) {
+      log.warn("volume-cleanup", `failed to remove stale session temp file ${filePath}: ${err.message}`);
+    }
+  }
+
+  return { removed, freedBytes };
+}
+
+function extractOpenclawVersion(versionOutput) {
+  const match = String(versionOutput ?? "").match(/\b\d{4}\.\d+\.\d+(?:[-.a-zA-Z0-9]+)?\b/);
+  return match?.[0] || "";
+}
+
+function cleanupStalePluginRuntimeDeps(currentVersion) {
+  const depsDir = path.join(STATE_DIR, "plugin-runtime-deps");
+  let removed = 0;
+  let freedBytes = 0;
+
+  if (!currentVersion) {
+    return { removed, freedBytes };
+  }
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(depsDir, { withFileTypes: true });
+  } catch {
+    return { removed, freedBytes };
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith("openclaw-")) {
+      continue;
+    }
+    if (entry.name.startsWith(`openclaw-${currentVersion}-`)) {
+      continue;
+    }
+
+    const dirPath = path.join(depsDir, entry.name);
+    try {
+      freedBytes += rmPath(dirPath);
+      removed += 1;
+    } catch (err) {
+      log.warn("volume-cleanup", `failed to remove stale plugin runtime cache ${dirPath}: ${err.message}`);
+    }
+  }
+
+  return { removed, freedBytes };
+}
+
+async function cleanupVolumeBeforeBoot() {
+  const sessions = cleanupStaleSessionTempFiles();
+  const { version } = await getOpenclawInfo();
+  const pluginDeps = cleanupStalePluginRuntimeDeps(extractOpenclawVersion(version));
+  const removed = sessions.removed + pluginDeps.removed;
+  const freedBytes = sessions.freedBytes + pluginDeps.freedBytes;
+
+  if (removed === 0) {
+    log.info("volume-cleanup", "no stale OpenClaw volume artifacts found");
+    return;
+  }
+
+  log.info(
+    "volume-cleanup",
+    `removed ${removed} stale artifacts, freeing about ${formatBytes(freedBytes)} ` +
+      `(sessionTemp=${sessions.removed}, pluginRuntimeCaches=${pluginDeps.removed})`,
+  );
 }
 
 function readConfig() {
@@ -2759,6 +2891,7 @@ const server = app.listen(PORT, () => {
   if (isConfigured()) {
     (async () => {
       try {
+        await cleanupVolumeBeforeBoot();
         log.info(
           "wrapper",
           "repairing legacy template config before gateway boot...",
