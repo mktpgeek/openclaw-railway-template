@@ -190,6 +190,75 @@ const STALE_SESSION_TMP_MAX_AGE_MS = Number.parseInt(
   process.env.OPENCLAW_STALE_SESSION_TMP_MAX_AGE_MS ?? "600000",
   10,
 );
+const RAILWAY_DEFAULT_DISABLED_PLUGINS = [
+  "alibaba",
+  "amazon-bedrock",
+  "amazon-bedrock-mantle",
+  "anthropic",
+  "anthropic-vertex",
+  "arcee",
+  "azure-speech",
+  "bonjour",
+  "browser",
+  "byteplus",
+  "chutes",
+  "cloudflare-ai-gateway",
+  "comfy",
+  "copilot-proxy",
+  "deepgram",
+  "deepseek",
+  "document-extract",
+  "elevenlabs",
+  "fal",
+  "fireworks",
+  "github-copilot",
+  "google",
+  "groq",
+  "huggingface",
+  "inworld",
+  "kilocode",
+  "kimi",
+  "litellm",
+  "lmstudio",
+  "memory-core",
+  "microsoft",
+  "microsoft-foundry",
+  "minimax",
+  "mistral",
+  "moonshot",
+  "nvidia",
+  "ollama",
+  "opencode",
+  "opencode-go",
+  "openrouter",
+  "phone-control",
+  "qianfan",
+  "qqbot",
+  "qwen",
+  "runway",
+  "senseaudio",
+  "sglang",
+  "stepfun",
+  "synthetic",
+  "tencent",
+  "talk-voice",
+  "together",
+  "tts-local-cli",
+  "venice",
+  "vercel-ai-gateway",
+  "vllm",
+  "volcengine",
+  "voyage",
+  "vydra",
+  "web-readability",
+  "xai",
+  "xiaomi",
+  "zai",
+];
+const DEFAULT_DISABLED_PLUGINS = parseListEnv(
+  "OPENCLAW_DEFAULT_DISABLED_PLUGINS",
+  RAILWAY_DEFAULT_DISABLED_PLUGINS,
+);
 
 const ACP_ALLOWED_AGENTS = [
   "claude",
@@ -210,6 +279,17 @@ const ACP_ALLOWED_AGENTS = [
 
 function clawArgs(args) {
   return [OPENCLAW_ENTRY, ...args];
+}
+
+function parseListEnv(name, fallback) {
+  if (!Object.prototype.hasOwnProperty.call(process.env, name)) {
+    return fallback;
+  }
+
+  return process.env[name]
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 }
 
 function configPath() {
@@ -1825,8 +1905,33 @@ async function repairLegacyTemplateConfig(
     }
   }
 
+  if (DEFAULT_DISABLED_PLUGINS.length > 0) {
+    if (!config.plugins || typeof config.plugins !== "object") {
+      config.plugins = {};
+    }
+    if (!config.plugins.entries || typeof config.plugins.entries !== "object") {
+      config.plugins.entries = {};
+    }
+
+    for (const pluginId of DEFAULT_DISABLED_PLUGINS) {
+      const entry = config.plugins.entries[pluginId];
+      if (!entry || typeof entry !== "object") {
+        config.plugins.entries[pluginId] = { enabled: false };
+        changed = true;
+        output += `[config repair] disabled default plugin ${pluginId}\n`;
+        continue;
+      }
+
+      if (!Object.prototype.hasOwnProperty.call(entry, "enabled")) {
+        entry.enabled = false;
+        changed = true;
+        output += `[config repair] disabled default plugin ${pluginId}\n`;
+      }
+    }
+  }
+
   if (!changed) {
-    output += "[config repair] no legacy template keys found\n";
+    output += "[config repair] no template config changes needed\n";
     return { ok: true, changed: false, output };
   }
 
