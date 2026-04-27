@@ -1,6 +1,13 @@
 #!/bin/bash
 set -e
 
+OPENCLAW_EXTENSIONS_DIR="/usr/local/lib/node_modules/openclaw/dist/extensions"
+if [ -d "$OPENCLAW_EXTENSIONS_DIR" ]; then
+  find "$OPENCLAW_EXTENSIONS_DIR" \
+    -type d \( -name ".openclaw-runtime-deps-copy-*" -o -name ".openclaw-install-stage" \) \
+    -prune -exec rm -rf {} +
+fi
+
 chown -R openclaw:openclaw /data
 chmod 700 /data
 
