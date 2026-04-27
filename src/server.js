@@ -763,6 +763,28 @@ let gmailWatcherLastStartTime = 0;
 let intentionalGmailWatcherRestart = false;
 let gmailWatcherConfigSignature = null;
 
+function isTcpReachable(host, port, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const socket = net.createConnection({ host, port });
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    socket.once("connect", () => {
+      clearTimeout(timer);
+      finish(true);
+    });
+    socket.once("error", () => {
+      clearTimeout(timer);
+      finish(false);
+    });
+  });
+}
+
 // Short-lived cache of whether the Gmail watcher is accepting connections on
 // its local port. Used by the /gmail-pubsub fast-fail path so Google Pub/Sub
 // pushes don't hold sockets open waiting for ECONNREFUSED, which under retry
@@ -777,31 +799,11 @@ async function isGmailWatcherReachable() {
   if (now < gmailWatcherReachableCache.expiresAt) {
     return gmailWatcherReachableCache.ok;
   }
-  const ok = await new Promise((resolve) => {
-    let settled = false;
-    const socket = net.createConnection({
-      host: GMAIL_WATCHER_HOST,
-      port: GMAIL_WATCHER_PORT,
-    });
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      resolve(value);
-    };
-    const timer = setTimeout(
-      () => finish(false),
-      GMAIL_WATCHER_REACHABLE_PROBE_TIMEOUT_MS,
-    );
-    socket.once("connect", () => {
-      clearTimeout(timer);
-      finish(true);
-    });
-    socket.once("error", () => {
-      clearTimeout(timer);
-      finish(false);
-    });
-  });
+  const ok = await isTcpReachable(
+    GMAIL_WATCHER_HOST,
+    GMAIL_WATCHER_PORT,
+    GMAIL_WATCHER_REACHABLE_PROBE_TIMEOUT_MS,
+  );
   gmailWatcherReachableCache = {
     ok,
     expiresAt: Date.now() + GMAIL_WATCHER_REACHABLE_CACHE_MS,
@@ -1284,13 +1286,11 @@ app.get("/setup/healthz", async (_req, res) => {
   let gatewayReachable = false;
 
   if (gatewayRunning) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3000);
-      const r = await fetch(`${GATEWAY_TARGET}/`, { signal: controller.signal });
-      clearTimeout(timeout);
-      gatewayReachable = r !== null;
-    } catch {}
+    gatewayReachable = await isTcpReachable(
+      INTERNAL_GATEWAY_HOST,
+      INTERNAL_GATEWAY_PORT,
+      3_000,
+    );
   }
 
   res.json({
