@@ -69,6 +69,17 @@ const log = {
   error: (category, message) => writeLog("ERROR", category, message),
 };
 
+function parsePositiveIntegerEnv(name, fallback) {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+
+  log.warn("config", `invalid ${name}=${JSON.stringify(raw)}; using ${fallback}`);
+  return fallback;
+}
+
 function resolveGatewayToken() {
   const envTok = process.env.OPENCLAW_GATEWAY_TOKEN?.trim();
   if (envTok) return envTok;
@@ -140,14 +151,21 @@ const ACP_PERMISSION_MODE =
   process.env.OPENCLAW_ACP_PERMISSION_MODE?.trim() || "approve-all";
 const ACP_PLUGIN_TOOLS_MCP_BRIDGE =
   process.env.OPENCLAW_ACP_PLUGIN_TOOLS_MCP_BRIDGE?.toLowerCase() === "true";
-const ACP_MAX_CONCURRENT_SESSIONS = Number.parseInt(
-  process.env.OPENCLAW_ACP_MAX_CONCURRENT_SESSIONS ?? "8",
-  10,
+const ACP_MAX_CONCURRENT_SESSIONS = parsePositiveIntegerEnv(
+  "OPENCLAW_ACP_MAX_CONCURRENT_SESSIONS",
+  2,
 );
-const ACP_RUNTIME_TTL_MINUTES = Number.parseInt(
-  process.env.OPENCLAW_ACP_RUNTIME_TTL_MINUTES ?? "120",
-  10,
+const ACP_RUNTIME_TTL_MINUTES = parsePositiveIntegerEnv(
+  "OPENCLAW_ACP_RUNTIME_TTL_MINUTES",
+  60,
 );
+const AGENT_MAX_CONCURRENT = parsePositiveIntegerEnv("OPENCLAW_AGENT_MAX_CONCURRENT", 2);
+const AGENT_SUBAGENT_MAX_CONCURRENT = parsePositiveIntegerEnv(
+  "OPENCLAW_AGENT_SUBAGENT_MAX_CONCURRENT",
+  2,
+);
+const AGENT_THINKING_DEFAULT =
+  process.env.OPENCLAW_AGENT_THINKING_DEFAULT?.trim() || "high";
 const CODEX_CLI_VERSION =
   process.env.OPENCLAW_CODEX_CLI_VERSION?.trim() || "0.118.0";
 const RAILWAY_VOLUME_PATH =
@@ -2061,6 +2079,14 @@ async function configureAcpSupport() {
     ["config", "set", "acp.defaultAgent", ACP_DEFAULT_AGENT],
     ["config", "set", "acp.maxConcurrentSessions", String(ACP_MAX_CONCURRENT_SESSIONS)],
     ["config", "set", "acp.runtime.ttlMinutes", String(ACP_RUNTIME_TTL_MINUTES)],
+    ["config", "set", "agents.defaults.maxConcurrent", String(AGENT_MAX_CONCURRENT)],
+    [
+      "config",
+      "set",
+      "agents.defaults.subagents.maxConcurrent",
+      String(AGENT_SUBAGENT_MAX_CONCURRENT),
+    ],
+    ["config", "set", "agents.defaults.thinkingDefault", AGENT_THINKING_DEFAULT],
     [
       "config",
       "set",

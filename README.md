@@ -98,10 +98,19 @@ The web TUI implements multiple security layers:
 | `TUI_IDLE_TIMEOUT_MS` | `300000` (5 min) | Closes session after inactivity |
 | `TUI_MAX_SESSION_MS` | `1800000` (30 min) | Maximum session duration |
 | `OPENCLAW_ACP_DEFAULT_AGENT` | `codex` | Default ACP harness when one is not specified |
-| `OPENCLAW_ACP_MAX_CONCURRENT_SESSIONS` | `8` | ACP session concurrency cap |
-| `OPENCLAW_ACP_RUNTIME_TTL_MINUTES` | `120` | ACP session TTL |
+| `OPENCLAW_ACP_MAX_CONCURRENT_SESSIONS` | `2` | ACP session concurrency cap |
+| `OPENCLAW_ACP_RUNTIME_TTL_MINUTES` | `60` | ACP session TTL |
+| `OPENCLAW_AGENT_MAX_CONCURRENT` | `2` | Default OpenClaw agent session concurrency cap |
+| `OPENCLAW_AGENT_SUBAGENT_MAX_CONCURRENT` | `2` | Default subagent fanout cap |
+| `OPENCLAW_AGENT_THINKING_DEFAULT` | `high` | Default thinking level for new/repaired setups |
 | `OPENCLAW_CODEX_CLI_VERSION` | `0.118.0` | Codex CLI version baked into the image / installed during ACP bootstrap |
 | `OPENCLAW_MANAGE_GMAIL_WATCHER` | `false` | Set to `true` only for older OpenClaw builds that do not manage the Gmail hook listener themselves |
+
+### Railway Cost Controls
+
+This template defaults to conservative concurrency so a small Railway service does not fan out into many simultaneous agent or ACP processes. Increase `OPENCLAW_ACP_MAX_CONCURRENT_SESSIONS`, `OPENCLAW_AGENT_MAX_CONCURRENT`, or `OPENCLAW_AGENT_SUBAGENT_MAX_CONCURRENT` only if you expect multiple active conversations or cron jobs to run at the same time.
+
+For deeper savings, disable unused OpenClaw plugins/channels in the OpenClaw config. For example, Telegram-only deployments can disable Slack, and deployments that do not need browser automation can disable the browser plugin.
 
 ## Local testing
 
