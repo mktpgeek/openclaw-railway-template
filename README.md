@@ -95,6 +95,7 @@ The web TUI implements multiple security layers:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ENABLE_WEB_TUI` | `false` | Set to `true` to enable |
+| `NODE_OPTIONS` | `--max-old-space-size=768` | Caps Node heap growth to reduce Railway memory usage |
 | `TUI_IDLE_TIMEOUT_MS` | `300000` (5 min) | Closes session after inactivity |
 | `TUI_MAX_SESSION_MS` | `1800000` (30 min) | Maximum session duration |
 | `OPENCLAW_ACP_DEFAULT_AGENT` | `codex` | Default ACP harness when one is not specified |
