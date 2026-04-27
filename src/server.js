@@ -159,6 +159,10 @@ const ACP_RUNTIME_TTL_MINUTES = parsePositiveIntegerEnv(
   "OPENCLAW_ACP_RUNTIME_TTL_MINUTES",
   60,
 );
+const DOCTOR_FIX_TIMEOUT_MS = parsePositiveIntegerEnv(
+  "OPENCLAW_DOCTOR_FIX_TIMEOUT_MS",
+  180_000,
+);
 const AGENT_MAX_CONCURRENT = parsePositiveIntegerEnv("OPENCLAW_AGENT_MAX_CONCURRENT", 2);
 const AGENT_SUBAGENT_MAX_CONCURRENT = parsePositiveIntegerEnv(
   "OPENCLAW_AGENT_SUBAGENT_MAX_CONCURRENT",
@@ -1682,26 +1686,69 @@ function resolveRequestedModel(payload) {
 }
 
 function runCmd(cmd, args, opts = {}) {
+  const { timeoutMs, timeoutCode = 124, ...spawnOpts } = opts;
+
   return new Promise((resolve) => {
+    let settled = false;
+    let timedOut = false;
+    let killTimer = null;
+    let timeoutTimer = null;
+    let out = "";
+
+    function killProcessGroup(signal) {
+      if (!proc.pid) return;
+      try {
+        process.kill(timeoutMs ? -proc.pid : proc.pid, signal);
+      } catch (err) {
+        if (err.code !== "ESRCH") {
+          out += `\n[kill error] ${String(err)}\n`;
+        }
+      }
+    }
+
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (killTimer) clearTimeout(killTimer);
+      resolve(result);
+    }
+
     const proc = childProcess.spawn(cmd, args, {
-      ...opts,
+      ...spawnOpts,
+      detached: timeoutMs ? true : spawnOpts.detached,
       env: buildChildEnv({
         OPENCLAW_STATE_DIR: STATE_DIR,
         OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
-        ...(opts.env || {}),
+        ...(spawnOpts.env || {}),
       }, { quiet: true }),
     });
 
-    let out = "";
     proc.stdout?.on("data", (d) => (out += d.toString("utf8")));
     proc.stderr?.on("data", (d) => (out += d.toString("utf8")));
 
+    if (timeoutMs) {
+      timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        out += `\n[timeout] command exceeded ${timeoutMs}ms; terminating\n`;
+        killProcessGroup("SIGTERM");
+        killTimer = setTimeout(() => killProcessGroup("SIGKILL"), 5_000);
+        killTimer.unref?.();
+      }, timeoutMs);
+      timeoutTimer.unref?.();
+    }
+
     proc.on("error", (err) => {
       out += `\n[spawn error] ${String(err)}\n`;
-      resolve({ code: 127, output: out });
+      finish({ code: 127, output: out });
     });
 
-    proc.on("close", (code) => resolve({ code: code ?? 0, output: out }));
+    proc.on("close", (code, signal) => {
+      if (timedOut && signal) {
+        out += `[timeout] terminated by ${signal}\n`;
+      }
+      finish({ code: timedOut ? timeoutCode : code ?? 0, output: out });
+    });
   });
 }
 
@@ -1709,6 +1756,7 @@ async function runDoctorFix(reason = "Repairing config and state") {
   const result = await runCmd(
     OPENCLAW_NODE,
     clawArgs(["doctor", "--fix", "--non-interactive", "--yes"]),
+    { timeoutMs: DOCTOR_FIX_TIMEOUT_MS },
   );
   let output = `[doctor] ${reason}\n`;
   output += `[doctor --fix --non-interactive --yes] exit=${result.code}\n`;
