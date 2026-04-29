@@ -421,6 +421,55 @@ function cleanupStalePluginRuntimeDeps(currentVersion) {
   return { removed, freedBytes };
 }
 
+function findFirstUnwritablePluginRuntimeDepsPath() {
+  const depsDir = path.join(STATE_DIR, "plugin-runtime-deps");
+  let entries = [];
+
+  try {
+    fs.accessSync(depsDir, fs.constants.W_OK | fs.constants.X_OK);
+    entries = fs.readdirSync(depsDir, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === "ENOENT") return null;
+    return { path: depsDir, error: err.message };
+  }
+
+  const dirs = entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(depsDir, entry.name));
+
+  while (dirs.length > 0) {
+    const dirPath = dirs.pop();
+    try {
+      fs.accessSync(dirPath, fs.constants.W_OK | fs.constants.X_OK);
+      for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          dirs.push(path.join(dirPath, entry.name));
+        }
+      }
+    } catch (err) {
+      return { path: dirPath, error: err.message };
+    }
+  }
+
+  return null;
+}
+
+function exitIfPluginRuntimeDepsUnwritable() {
+  const unwritable = findFirstUnwritablePluginRuntimeDepsPath();
+  if (!unwritable) return false;
+
+  log.error(
+    "volume-cleanup",
+    `plugin runtime cache is not writable at ${unwritable.path}: ${unwritable.error}`,
+  );
+  log.error(
+    "volume-cleanup",
+    "exiting so Railway restarts the container and entrypoint repairs /data ownership",
+  );
+  process.exit(1);
+  return true;
+}
+
 async function cleanupVolumeBeforeBoot() {
   const sessions = cleanupStaleSessionTempFiles();
   const { version } = await getOpenclawInfo();
@@ -992,6 +1041,7 @@ async function startGateway() {
 
   fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+  if (exitIfPluginRuntimeDepsUnwritable()) return;
   const codexTrust = ensureCodexWorkspaceTrust(WORKSPACE_DIR);
   if (codexTrust.ok && codexTrust.changed) {
     log.info("gateway", `trusted Codex workspace at ${WORKSPACE_DIR}`);

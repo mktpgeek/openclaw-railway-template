@@ -95,7 +95,7 @@ The web TUI implements multiple security layers:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ENABLE_WEB_TUI` | `false` | Set to `true` to enable |
-| `NODE_OPTIONS` | `--max-old-space-size=768` | Caps Node heap growth to reduce Railway memory usage |
+| `NODE_OPTIONS` | `--max-old-space-size=1024` | Caps Node heap growth to reduce Railway memory usage |
 | `TUI_IDLE_TIMEOUT_MS` | `300000` (5 min) | Closes session after inactivity |
 | `TUI_MAX_SESSION_MS` | `1800000` (30 min) | Maximum session duration |
 | `OPENCLAW_ACP_DEFAULT_AGENT` | `codex` | Default ACP harness when one is not specified |
@@ -159,10 +159,10 @@ A: New browsers/devices need a one-time approval from the gateway. Go to `/setup
 A: Use the OpenClaw CLI to switch models. Access the web terminal at `/tui` (if enabled) or SSH into your container and run:
 
 ```bash
-openclaw models set provider/model-id
+gosu openclaw openclaw models set provider/model-id
 ```
 
-For example: `openclaw models set anthropic/claude-sonnet-4-20250514` or `openclaw models set openai/gpt-4-turbo`. Use `openclaw models list --all` to see available models.
+For example: `gosu openclaw openclaw models set anthropic/claude-sonnet-4-20250514` or `gosu openclaw openclaw models set openai/gpt-4-turbo`. Use `gosu openclaw openclaw models list --all` to see available models. Railway SSH commands run as root by default; `gosu openclaw` keeps OpenClaw runtime cache files owned by the app user.
 
 **Q: Why does `/acp doctor` pass but `/acp spawn codex` or `/acp spawn claude` still fail?**
 
