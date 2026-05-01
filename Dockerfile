@@ -31,7 +31,11 @@ RUN useradd -m -s /bin/bash openclaw \
   && mkdir -p /home/linuxbrew/.linuxbrew && chown -R openclaw:openclaw /home/linuxbrew
 
 USER openclaw
-RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+RUN for attempt in 1 2 3; do \
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" && break; \
+    if [ "$attempt" = "3" ]; then exit 1; fi; \
+    sleep 10; \
+  done
 
 ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
 ENV HOMEBREW_PREFIX="/home/linuxbrew/.linuxbrew"
