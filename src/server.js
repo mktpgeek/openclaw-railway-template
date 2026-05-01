@@ -178,6 +178,13 @@ const CODEX_HOME =
   process.env.CODEX_HOME?.trim() || path.join(RAILWAY_VOLUME_PATH, ".codex");
 const CODEX_CONFIG_PATH = path.join(CODEX_HOME, "config.toml");
 const CODEX_AUTH_PATH = path.join(CODEX_HOME, "auth.json");
+const CODEX_SESSIONS_STORE_PATH = path.join(
+  STATE_DIR,
+  "agents",
+  "codex",
+  "sessions",
+  "sessions.json",
+);
 const MODEL_AUTH_STORE_PATH = path.join(
   STATE_DIR,
   "agents",
@@ -318,6 +325,10 @@ function readJsonFile(filePath) {
 function writeJsonFile(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function timestampForFileName(date = new Date()) {
+  return date.toISOString().replace(/[:.]/g, "-");
 }
 
 function formatBytes(bytes) {
@@ -863,6 +874,9 @@ function ensureCodexWorkspaceTrust(projectPath) {
     } catch {}
 
     if (current.includes(header)) {
+      try {
+        fs.chmodSync(CODEX_CONFIG_PATH, 0o600);
+      } catch {}
       return { ok: true, changed: false, path: CODEX_CONFIG_PATH };
     }
 
@@ -871,6 +885,7 @@ function ensureCodexWorkspaceTrust(projectPath) {
       ? `${current.trimEnd()}\n\n${block}`
       : block;
     fs.writeFileSync(CODEX_CONFIG_PATH, next, "utf8");
+    fs.chmodSync(CODEX_CONFIG_PATH, 0o600);
     return { ok: true, changed: true, path: CODEX_CONFIG_PATH };
   } catch (err) {
     return {
@@ -1045,6 +1060,74 @@ async function repairModelAuth(reason = "Repairing model auth") {
     changed,
     output,
   };
+}
+
+async function repairMissingCodexSessionTranscripts(
+  reason = "Repairing missing Codex session transcripts",
+) {
+  let output = `[session repair] ${reason}\n`;
+  const store = readJsonFile(CODEX_SESSIONS_STORE_PATH);
+  if (!store || typeof store !== "object" || Array.isArray(store)) {
+    output += `[session repair] skipped (store missing or unreadable at ${CODEX_SESSIONS_STORE_PATH})\n`;
+    return { ok: true, changed: false, output };
+  }
+
+  const sessionsDir = path.dirname(CODEX_SESSIONS_STORE_PATH);
+  const kept = {};
+  const removed = [];
+
+  for (const [sessionKey, entry] of Object.entries(store)) {
+    if (!entry || typeof entry !== "object") {
+      kept[sessionKey] = entry;
+      continue;
+    }
+
+    const sessionId = String(entry.sessionId ?? "").trim();
+    const sessionFile = String(
+      entry.sessionFile ||
+        (sessionId ? path.join(sessionsDir, `${sessionId}.jsonl`) : ""),
+    ).trim();
+    const transcriptMissing = Boolean(
+      sessionFile && !fs.existsSync(sessionFile),
+    );
+    if (!transcriptMissing) {
+      kept[sessionKey] = entry;
+      continue;
+    }
+
+    removed.push({
+      sessionKey,
+      sessionId,
+      sessionFile,
+      status: entry.status || "",
+    });
+  }
+
+  if (removed.length === 0) {
+    output += "[session repair] no missing Codex session transcripts found\n";
+    return { ok: true, changed: false, output };
+  }
+
+  try {
+    const backupPath =
+      `${CODEX_SESSIONS_STORE_PATH}.missing-transcripts.${timestampForFileName()}.bak`;
+    fs.copyFileSync(CODEX_SESSIONS_STORE_PATH, backupPath);
+    writeJsonFile(CODEX_SESSIONS_STORE_PATH, kept);
+    output += `[session repair] removed ${removed.length} stale Codex session entries with missing transcripts\n`;
+    output += `[session repair] backup: ${backupPath}\n`;
+    for (const removedEntry of removed.slice(0, 20)) {
+      output +=
+        `[session repair] removed ${removedEntry.sessionKey} ` +
+        `(${removedEntry.sessionId || "no-session-id"})\n`;
+    }
+    if (removed.length > 20) {
+      output += `[session repair] ...and ${removed.length - 20} more\n`;
+    }
+    return { ok: true, changed: true, output };
+  } catch (err) {
+    output += `[session repair] write failed: ${err.message}\n`;
+    return { ok: false, changed: false, output };
+  }
 }
 
 function buildChildEnv(extra = {}, opts = {}) {
@@ -2930,10 +3013,13 @@ app.post("/setup/api/doctor", requireSetupAuth, async (_req, res) => {
   const authRepair = await repairModelAuth(
     "Repairing placeholder provider auth from setup UI",
   );
-  const allOk = result.ok && acpRepair.ok && authRepair.ok;
+  const sessionRepair = await repairMissingCodexSessionTranscripts(
+    "Repairing missing Codex session transcripts from setup UI",
+  );
+  const allOk = result.ok && acpRepair.ok && authRepair.ok && sessionRepair.ok;
   return res.status(allOk ? 200 : 500).json({
     ok: allOk,
-    output: `${legacyRepair.output}\n${result.output}\n${acpRepair.output}\n${authRepair.output}`,
+    output: `${legacyRepair.output}\n${result.output}\n${acpRepair.output}\n${authRepair.output}\n${sessionRepair.output}`,
   });
 });
 
@@ -3417,6 +3503,10 @@ const server = app.listen(PORT, () => {
           "Startup repair for placeholder provider auth",
         );
         log.info("wrapper", authRepair.output.trimEnd());
+        const sessionRepair = await repairMissingCodexSessionTranscripts(
+          "Startup repair for missing Codex session transcripts",
+        );
+        log.info("wrapper", sessionRepair.output.trimEnd());
       } catch (err) {
         log.warn("wrapper", `doctor --fix failed: ${err.message}`);
       }

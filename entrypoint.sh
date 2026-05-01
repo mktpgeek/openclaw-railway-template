@@ -16,6 +16,8 @@ chown -R openclaw:openclaw /data/.config
 
 mkdir -p /data/.codex
 chown -R openclaw:openclaw /data/.codex
+find /data/.codex -type d -exec chmod 700 {} +
+find /data/.codex -type f -exec chmod 600 {} +
 
 if [ -L /data/.linuxbrew ] && [ "$(readlink /data/.linuxbrew)" = "/data/.linuxbrew" ]; then
   rm -f /data/.linuxbrew
