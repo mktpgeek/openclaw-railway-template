@@ -614,6 +614,56 @@ function normalizeOpenaiCodexModel(model) {
   return "";
 }
 
+function repairCodexAgentModelOverrides(config, targetModel) {
+  const agents = config?.agents?.list;
+  if (!Array.isArray(agents)) {
+    return [];
+  }
+
+  const normalizedTarget = normalizeOpenaiCodexModel(targetModel);
+  if (!normalizedTarget) {
+    return [];
+  }
+
+  const changed = [];
+  for (const agent of agents) {
+    if (!agent || typeof agent !== "object") {
+      continue;
+    }
+
+    const agentId = String(agent.id ?? "").trim();
+    const runtimeId = String(agent.agentRuntime?.id ?? "").trim();
+    const model = String(agent.model ?? "").trim();
+    if (agentId !== "codex" && runtimeId !== "codex") {
+      continue;
+    }
+    if (!model.startsWith("openai/")) {
+      continue;
+    }
+
+    agent.model = normalizedTarget;
+    changed.push({
+      agentId: agentId || runtimeId || "codex",
+      from: model,
+      to: normalizedTarget,
+    });
+  }
+
+  if (changed.length > 0) {
+    if (!config.agents.defaults || typeof config.agents.defaults !== "object") {
+      config.agents.defaults = {};
+    }
+    if (!config.agents.defaults.models || typeof config.agents.defaults.models !== "object") {
+      config.agents.defaults.models = {};
+    }
+    if (!config.agents.defaults.models[normalizedTarget]) {
+      config.agents.defaults.models[normalizedTarget] = {};
+    }
+  }
+
+  return changed;
+}
+
 function getModelAuthStore() {
   return readJsonFile(MODEL_AUTH_STORE_PATH);
 }
@@ -855,6 +905,22 @@ async function repairModelAuth(reason = "Repairing model auth") {
     }
   } else if (hasOpenaiPlaceholder && !hasOpenaiCodexOauth) {
     output += "[model auth repair] removed placeholder OpenAI auth, but no openai-codex OAuth profile was available for automatic migration\n";
+  }
+
+  const latestConfig = readConfig();
+  const codexTargetModel = getConfiguredModel() || DEFAULT_OPENAI_CODEX_MODEL;
+  if (hasOpenaiCodexOauth && codexTargetModel.startsWith("openai-codex/")) {
+    const agentModelChanges = repairCodexAgentModelOverrides(
+      latestConfig,
+      codexTargetModel,
+    );
+    if (agentModelChanges.length > 0) {
+      writeJsonFile(configPath(), latestConfig);
+      changed = true;
+      for (const change of agentModelChanges) {
+        output += `[model auth repair] switched ${change.agentId} agent model from ${change.from} to ${change.to}\n`;
+      }
+    }
   }
 
   return {
