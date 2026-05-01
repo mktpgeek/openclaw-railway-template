@@ -14,8 +14,13 @@ chmod 700 /data
 mkdir -p /data/.config
 chown -R openclaw:openclaw /data/.config
 
+if [ -L /data/.linuxbrew ] && [ "$(readlink /data/.linuxbrew)" = "/data/.linuxbrew" ]; then
+  rm -f /data/.linuxbrew
+fi
+
 if [ ! -d /data/.linuxbrew ]; then
-  cp -a /home/linuxbrew/.linuxbrew /data/.linuxbrew
+  rm -rf /data/.linuxbrew
+  cp -aT /home/linuxbrew/.linuxbrew /data/.linuxbrew
 fi
 
 rm -rf /home/linuxbrew/.linuxbrew

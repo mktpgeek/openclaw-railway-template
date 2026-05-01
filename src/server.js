@@ -207,9 +207,12 @@ const RAILWAY_DEFAULT_DISABLED_PLUGINS = [
   "copilot-proxy",
   "deepgram",
   "deepseek",
+  "discord",
   "document-extract",
   "elevenlabs",
   "fal",
+  "feishu",
+  "file-transfer",
   "fireworks",
   "github-copilot",
   "google",
@@ -220,6 +223,7 @@ const RAILWAY_DEFAULT_DISABLED_PLUGINS = [
   "kimi",
   "litellm",
   "lmstudio",
+  "matrix",
   "memory-core",
   "microsoft",
   "microsoft-foundry",
@@ -238,6 +242,7 @@ const RAILWAY_DEFAULT_DISABLED_PLUGINS = [
   "runway",
   "senseaudio",
   "sglang",
+  "slack",
   "stepfun",
   "synthetic",
   "tencent",
@@ -251,6 +256,7 @@ const RAILWAY_DEFAULT_DISABLED_PLUGINS = [
   "voyage",
   "vydra",
   "web-readability",
+  "whatsapp",
   "xai",
   "xiaomi",
   "zai",
@@ -328,7 +334,14 @@ function formatBytes(bytes) {
 }
 
 function getPathSize(pathToSize) {
-  const stat = fs.statSync(pathToSize);
+  let stat;
+  try {
+    stat = fs.statSync(pathToSize);
+  } catch (err) {
+    if (err.code === "ENOENT") return 0;
+    throw err;
+  }
+
   if (!stat.isDirectory()) {
     return stat.size;
   }
@@ -341,7 +354,13 @@ function getPathSize(pathToSize) {
 }
 
 function rmPath(pathToRemove) {
-  const size = getPathSize(pathToRemove);
+  let size = 0;
+  try {
+    size = getPathSize(pathToRemove);
+  } catch (err) {
+    log.warn("volume-cleanup", `failed to estimate size for ${pathToRemove}: ${err.message}`);
+  }
+
   fs.rmSync(pathToRemove, { recursive: true, force: true });
   return size;
 }
@@ -421,6 +440,68 @@ function cleanupStalePluginRuntimeDeps(currentVersion) {
   return { removed, freedBytes };
 }
 
+function cleanupPluginRuntimePnpmStores() {
+  const depsDir = path.join(STATE_DIR, "plugin-runtime-deps");
+  let removed = 0;
+  let freedBytes = 0;
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(depsDir, { withFileTypes: true });
+  } catch {
+    return { removed, freedBytes };
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith("openclaw-")) {
+      continue;
+    }
+
+    const storePath = path.join(depsDir, entry.name, ".openclaw-pnpm-store");
+    if (!fs.existsSync(storePath)) {
+      continue;
+    }
+
+    try {
+      freedBytes += rmPath(storePath);
+      removed += 1;
+    } catch (err) {
+      log.warn("volume-cleanup", `failed to remove plugin runtime pnpm store ${storePath}: ${err.message}`);
+    }
+  }
+
+  return { removed, freedBytes };
+}
+
+function cleanupStatePluginRuntimeDepsForExternalStageDir() {
+  const rawStageDir = process.env.OPENCLAW_PLUGIN_STAGE_DIR?.trim();
+  if (!rawStageDir) return { removed: 0, freedBytes: 0 };
+
+  const depsDir = path.join(STATE_DIR, "plugin-runtime-deps");
+  const stateDepsDir = path.resolve(depsDir);
+  const stageDirs = rawStageDir
+    .split(path.delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => path.resolve(entry.startsWith("~") ? path.join(os.homedir(), entry.slice(1)) : entry));
+
+  if (stageDirs.some((stageDir) => stageDir === stateDepsDir)) {
+    return { removed: 0, freedBytes: 0 };
+  }
+
+  if (!fs.existsSync(depsDir)) {
+    return { removed: 0, freedBytes: 0 };
+  }
+
+  try {
+    const freedBytes = rmPath(depsDir);
+    return { removed: 1, freedBytes };
+  } catch (err) {
+    log.warn("volume-cleanup", `failed to remove state plugin runtime deps ${depsDir}: ${err.message}`);
+    return { removed: 0, freedBytes: 0 };
+  }
+}
+
 function findFirstUnwritablePluginRuntimeDepsPath() {
   const depsDir = path.join(STATE_DIR, "plugin-runtime-deps");
   let entries = [];
@@ -474,8 +555,14 @@ async function cleanupVolumeBeforeBoot() {
   const sessions = cleanupStaleSessionTempFiles();
   const { version } = await getOpenclawInfo();
   const pluginDeps = cleanupStalePluginRuntimeDeps(extractOpenclawVersion(version));
-  const removed = sessions.removed + pluginDeps.removed;
-  const freedBytes = sessions.freedBytes + pluginDeps.freedBytes;
+  const pluginStores = cleanupPluginRuntimePnpmStores();
+  const externalPluginDeps = cleanupStatePluginRuntimeDepsForExternalStageDir();
+  const removed = sessions.removed + pluginDeps.removed + pluginStores.removed + externalPluginDeps.removed;
+  const freedBytes =
+    sessions.freedBytes +
+    pluginDeps.freedBytes +
+    pluginStores.freedBytes +
+    externalPluginDeps.freedBytes;
 
   if (removed === 0) {
     log.info("volume-cleanup", "no stale OpenClaw volume artifacts found");
@@ -485,7 +572,8 @@ async function cleanupVolumeBeforeBoot() {
   log.info(
     "volume-cleanup",
     `removed ${removed} stale artifacts, freeing about ${formatBytes(freedBytes)} ` +
-      `(sessionTemp=${sessions.removed}, pluginRuntimeCaches=${pluginDeps.removed})`,
+      `(sessionTemp=${sessions.removed}, pluginRuntimeCaches=${pluginDeps.removed}, ` +
+      `pluginRuntimeStores=${pluginStores.removed}, externalPluginRuntimeCaches=${externalPluginDeps.removed})`,
   );
 }
 

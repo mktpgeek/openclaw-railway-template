@@ -10,3 +10,4 @@ restartPolicyType = "on_failure"
 [variables]
 PORT = "8080"
 NODE_OPTIONS = "--max-old-space-size=1024"
+OPENCLAW_PLUGIN_STAGE_DIR = "/tmp/openclaw-plugin-runtime-deps"
