@@ -14,6 +14,9 @@ chmod 700 /data
 mkdir -p /data/.config
 chown -R openclaw:openclaw /data/.config
 
+mkdir -p /data/.codex
+chown -R openclaw:openclaw /data/.codex
+
 if [ -L /data/.linuxbrew ] && [ "$(readlink /data/.linuxbrew)" = "/data/.linuxbrew" ]; then
   rm -f /data/.linuxbrew
 fi
@@ -28,11 +31,13 @@ ln -sfn /data/.linuxbrew /home/linuxbrew/.linuxbrew
 
 mkdir -p /home/openclaw
 ln -sfn /data/.config /home/openclaw/.config
+ln -sfn /data/.codex /home/openclaw/.codex
 
 export HOME=/home/openclaw
 export USER=openclaw
 export LOGNAME=openclaw
 export XDG_CONFIG_HOME=/data/.config
+export CODEX_HOME=/data/.codex
 export CLOUDSDK_CONFIG=/data/.config/gcloud
 export PATH="/data/google-cloud-sdk/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
 

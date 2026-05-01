@@ -34,7 +34,7 @@ This template now configures OpenClaw ACP support as part of the normal setup fl
 - Codex CLI: `/usr/local/bin/codex` baked into the image
 - Codex home: persisted at `/data/.codex` by default on Railway
 - Codex workspace trust: `/data/workspace` is auto-added to `/data/.codex/config.toml`
-- If you choose `OpenAI Codex (ChatGPT OAuth)` during setup, leave the secret field empty. The wrapper will onboard without a provider secret, then default the model to `openai-codex/gpt-5.4` unless you provide another `openai-codex/...` model.
+- If you choose `OpenAI Codex (ChatGPT OAuth)` during setup, leave the secret field empty. The wrapper will onboard without a provider secret, default the model to `openai-codex/gpt-5.4` unless you provide another `openai-codex/...` model, and sync the OpenClaw OAuth profile into `/data/.codex/auth.json` for Codex app-server runs.
 
 After setup, validate ACP from chat with:
 
@@ -167,7 +167,7 @@ For example: `gosu openclaw openclaw models set anthropic/claude-sonnet-4-202505
 
 **Q: Why does `/acp doctor` pass but `/acp spawn codex` or `/acp spawn claude` still fail?**
 
-A: ACP still needs harness-side auth on the host. The OpenClaw gateway model you selected during setup is separate from Codex/Claude/Gemini CLI auth. For Codex on Railway, you need a real `OPENAI_API_KEY` or `CODEX_API_KEY`, plus the Codex CLI installed and the workspace trusted. This template now bootstraps the CLI, stores Codex auth under `/data/.codex`, and keeps trust config on the Railway volume, so the remaining blocker is usually credentials. If a harness reports an auth error on first use, add the required vendor credentials to the Railway environment or log in through the web terminal and rerun `/acp doctor`.
+A: ACP still needs harness-side auth on the host. The OpenClaw gateway model you selected during setup is separate from Codex/Claude/Gemini CLI auth. For Codex on Railway, this template now bootstraps the CLI, keeps `/data/.codex` on the Railway volume, trusts `/data/workspace`, and syncs the OpenClaw `openai-codex` OAuth profile into Codex's `auth.json`. If a non-Codex harness reports an auth error on first use, add the required vendor credentials to the Railway environment or log in through the web terminal and rerun `/acp doctor`.
 
 **Q: I see `401 Incorrect API key provided: not-needed`. How do I fix it?**
 

@@ -614,6 +614,24 @@ function normalizeOpenaiCodexModel(model) {
   return "";
 }
 
+function toRfc3339(value) {
+  if (!value) {
+    return "";
+  }
+
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : "";
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const millis = value > 10_000_000_000 ? value : value * 1000;
+    return new Date(millis).toISOString();
+  }
+
+  return "";
+}
+
 function repairCodexAgentModelOverrides(config, targetModel) {
   const agents = config?.agents?.list;
   if (!Array.isArray(agents)) {
@@ -662,6 +680,97 @@ function repairCodexAgentModelOverrides(config, targetModel) {
   }
 
   return changed;
+}
+
+function getOpenaiCodexOauthProfile(authStore) {
+  const profiles = authStore?.profiles;
+  if (!profiles || typeof profiles !== "object") {
+    return null;
+  }
+
+  for (const [profileId, profile] of Object.entries(profiles)) {
+    if (profile?.provider !== "openai-codex" || profile?.type !== "oauth") {
+      continue;
+    }
+
+    const tokens = profile.tokens || {};
+    const accessToken =
+      String(profile.access ?? "").trim() ||
+      String(tokens.access_token ?? "").trim();
+    const refreshToken =
+      String(profile.refresh ?? "").trim() ||
+      String(tokens.refresh_token ?? "").trim();
+    const idToken =
+      String(profile.id_token ?? "").trim() ||
+      String(profile.idToken ?? "").trim() ||
+      String(tokens.id_token ?? "").trim() ||
+      accessToken;
+    if (!accessToken || !refreshToken || !idToken) {
+      continue;
+    }
+
+    return {
+      profileId,
+      accessToken,
+      refreshToken,
+      idToken,
+      expiresAt: toRfc3339(
+        profile.expiresAt ??
+        profile.expires ??
+        tokens.expires_at ??
+        tokens.expiry,
+      ),
+    };
+  }
+
+  return null;
+}
+
+function syncCodexCliAuthFromOpenClawProfile(authStore) {
+  const profile = getOpenaiCodexOauthProfile(authStore);
+  if (!profile) {
+    return { ok: true, changed: false, profileId: "", reason: "no-profile" };
+  }
+
+  const current = readJsonFile(CODEX_AUTH_PATH) || {};
+  const currentTokens = current.tokens || {};
+  const nextTokens = {
+    id_token: profile.idToken,
+    access_token: profile.accessToken,
+    refresh_token: profile.refreshToken,
+  };
+  if (profile.expiresAt) {
+    nextTokens.expires_at = profile.expiresAt;
+  }
+
+  const alreadySynced =
+    current.auth_mode === "chatgpt" &&
+    currentTokens.id_token === nextTokens.id_token &&
+    currentTokens.access_token === nextTokens.access_token &&
+    currentTokens.refresh_token === nextTokens.refresh_token &&
+    (currentTokens.expires_at || "") === (nextTokens.expires_at || "");
+  if (alreadySynced) {
+    return { ok: true, changed: false, profileId: profile.profileId, reason: "up-to-date" };
+  }
+
+  const nextAuth = {
+    auth_mode: "chatgpt",
+    tokens: nextTokens,
+    last_refresh: new Date().toISOString(),
+  };
+
+  try {
+    writeJsonFile(CODEX_AUTH_PATH, nextAuth);
+    fs.chmodSync(CODEX_AUTH_PATH, 0o600);
+    return { ok: true, changed: true, profileId: profile.profileId, reason: "synced" };
+  } catch (err) {
+    return {
+      ok: false,
+      changed: false,
+      profileId: profile.profileId,
+      reason: err.message,
+    };
+  }
 }
 
 function getModelAuthStore() {
@@ -795,6 +904,7 @@ function getCodexAuthStatus() {
     fileKey =
       raw?.CODEX_API_KEY?.trim() || raw?.OPENAI_API_KEY?.trim() || "";
     hasOauthTokens = Boolean(
+      raw?.tokens?.id_token &&
       raw?.tokens?.access_token &&
       raw?.tokens?.refresh_token &&
       raw?.auth_mode === "chatgpt"
@@ -884,6 +994,13 @@ async function repairModelAuth(reason = "Repairing model auth") {
     profileId === "openai:default" || profileId.startsWith("openai:")
   ));
   const hasOpenaiCodexOauth = hasOauthProfile(authStore, "openai-codex");
+  const codexCliAuth = syncCodexCliAuthFromOpenClawProfile(authStore);
+  if (!codexCliAuth.ok) {
+    output += `[codex auth] failed to sync Codex CLI auth: ${codexCliAuth.reason}\n`;
+  } else if (codexCliAuth.changed) {
+    changed = true;
+    output += `[codex auth] synced Codex CLI auth from ${codexCliAuth.profileId} to ${CODEX_AUTH_PATH}\n`;
+  }
 
   if (
     hasOpenaiPlaceholder &&
@@ -934,6 +1051,7 @@ function buildChildEnv(extra = {}, opts = {}) {
   const quiet = opts.quiet === true;
   const env = {
     ...process.env,
+    CODEX_HOME,
     ...extra,
   };
 

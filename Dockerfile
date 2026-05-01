@@ -46,6 +46,7 @@ ENV PORT=8080
 ENV NODE_OPTIONS=--max-old-space-size=1024
 ENV OPENCLAW_ENTRY=/usr/local/lib/node_modules/openclaw/dist/entry.js
 ENV OPENCLAW_PLUGIN_STAGE_DIR=/tmp/openclaw-plugin-runtime-deps
+ENV CODEX_HOME=/data/.codex
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
