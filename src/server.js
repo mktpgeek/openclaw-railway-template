@@ -811,6 +811,42 @@ function hasOauthProfile(authStore, provider) {
   ));
 }
 
+function hasProviderCredential(authStore, provider) {
+  const profiles = authStore?.profiles;
+  if (!profiles || typeof profiles !== "object") {
+    return false;
+  }
+
+  return Object.values(profiles).some((profile) => {
+    if (profile?.provider !== provider) {
+      return false;
+    }
+
+    const tokens = profile?.tokens || {};
+    return Boolean(
+      (
+        profile?.type === "api_key" &&
+        !isDummyCredential(profile?.key) &&
+        String(profile?.key ?? "").trim()
+      ) ||
+      (
+        profile?.type === "token" &&
+        !isDummyCredential(profile?.token) &&
+        String(profile?.token ?? "").trim()
+      ) ||
+      (
+        profile?.type === "oauth" &&
+        (
+          String(profile?.access ?? "").trim() ||
+          String(profile?.refresh ?? "").trim() ||
+          String(tokens.access_token ?? "").trim() ||
+          String(tokens.refresh_token ?? "").trim()
+        )
+      )
+    );
+  });
+}
+
 function removePlaceholderAuthProfiles(authStore) {
   const profiles = authStore?.profiles;
   if (!profiles || typeof profiles !== "object") {
@@ -1014,6 +1050,12 @@ async function repairModelAuth(reason = "Repairing model auth") {
     profileId === "openai:default" || profileId.startsWith("openai:")
   ));
   const hasOpenaiCodexOauth = hasOauthProfile(authStore, "openai-codex");
+  const hasOpenaiCredential =
+    hasProviderCredential(authStore, "openai") ||
+    Boolean(
+      process.env.OPENAI_API_KEY?.trim() &&
+      !isDummyCredential(process.env.OPENAI_API_KEY),
+    );
   const codexCliAuth = syncCodexCliAuthFromOpenClawProfile(authStore);
   if (!codexCliAuth.ok) {
     output += `[codex auth] failed to sync Codex CLI auth: ${codexCliAuth.reason}\n`;
@@ -1023,10 +1065,10 @@ async function repairModelAuth(reason = "Repairing model auth") {
   }
 
   if (
-    hasOpenaiPlaceholder &&
     hasOpenaiCodexOauth &&
     currentModel &&
-    currentModel.startsWith("openai/")
+    currentModel.startsWith("openai/") &&
+    (hasOpenaiPlaceholder || !hasOpenaiCredential)
   ) {
     const preferredModel = normalizeOpenaiCodexModel(currentModel);
     const setResult = await setDefaultModelWithFallback(preferredModel);
