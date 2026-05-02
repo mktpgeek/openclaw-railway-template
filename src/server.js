@@ -178,6 +178,11 @@ const CODEX_HOME =
   process.env.CODEX_HOME?.trim() || path.join(RAILWAY_VOLUME_PATH, ".codex");
 const CODEX_CONFIG_PATH = path.join(CODEX_HOME, "config.toml");
 const CODEX_AUTH_PATH = path.join(CODEX_HOME, "auth.json");
+const CODEX_LOG_DB_PATH = path.join(CODEX_HOME, "logs_2.sqlite");
+const CODEX_LOG_DB_MAX_BYTES = parsePositiveIntegerEnv(
+  "OPENCLAW_CODEX_LOG_DB_MAX_BYTES",
+  512 * 1024 * 1024,
+);
 const CODEX_SESSIONS_STORE_PATH = path.join(
   STATE_DIR,
   "agents",
@@ -1126,6 +1131,52 @@ async function repairMissingCodexSessionTranscripts(
     return { ok: true, changed: true, output };
   } catch (err) {
     output += `[session repair] write failed: ${err.message}\n`;
+    return { ok: false, changed: false, output };
+  }
+}
+
+async function repairOversizedCodexLogDatabase(
+  reason = "Repairing oversized Codex log database",
+) {
+  let output =
+    `[codex log repair] ${reason} ` +
+    `(max ${formatBytes(CODEX_LOG_DB_MAX_BYTES)})\n`;
+
+  let stat;
+  try {
+    stat = fs.statSync(CODEX_LOG_DB_PATH);
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      output += "[codex log repair] no Codex log database found\n";
+      return { ok: true, changed: false, output };
+    }
+    output += `[codex log repair] stat failed: ${err.message}\n`;
+    return { ok: false, changed: false, output };
+  }
+
+  if (stat.size <= CODEX_LOG_DB_MAX_BYTES) {
+    output +=
+      `[codex log repair] Codex log database is ${formatBytes(stat.size)}; ` +
+      "no cleanup needed\n";
+    return { ok: true, changed: false, output };
+  }
+
+  const paths = [
+    CODEX_LOG_DB_PATH,
+    `${CODEX_LOG_DB_PATH}-shm`,
+    `${CODEX_LOG_DB_PATH}-wal`,
+  ];
+
+  try {
+    for (const filePath of paths) {
+      fs.rmSync(filePath, { force: true });
+    }
+    output +=
+      `[codex log repair] removed oversized Codex log database ` +
+      `(${formatBytes(stat.size)})\n`;
+    return { ok: true, changed: true, output };
+  } catch (err) {
+    output += `[codex log repair] cleanup failed: ${err.message}\n`;
     return { ok: false, changed: false, output };
   }
 }
@@ -3013,13 +3064,38 @@ app.post("/setup/api/doctor", requireSetupAuth, async (_req, res) => {
   const authRepair = await repairModelAuth(
     "Repairing placeholder provider auth from setup UI",
   );
+  const codexLogRepair = await repairOversizedCodexLogDatabase(
+    "Repairing oversized Codex log database from setup UI",
+  );
+  let codexLogRestartOk = true;
+  let codexLogRestartOutput = "";
+  if (codexLogRepair.changed && isGatewayReady()) {
+    try {
+      await restartGateway();
+      codexLogRestartOutput =
+        "\n[codex log repair] gateway restarted after log database cleanup";
+    } catch (err) {
+      codexLogRestartOk = false;
+      codexLogRestartOutput =
+        `\n[codex log repair] gateway restart failed: ${err.message}`;
+    }
+  }
   const sessionRepair = await repairMissingCodexSessionTranscripts(
     "Repairing missing Codex session transcripts from setup UI",
   );
-  const allOk = result.ok && acpRepair.ok && authRepair.ok && sessionRepair.ok;
+  const allOk =
+    result.ok &&
+    acpRepair.ok &&
+    authRepair.ok &&
+    codexLogRepair.ok &&
+    codexLogRestartOk &&
+    sessionRepair.ok;
   return res.status(allOk ? 200 : 500).json({
     ok: allOk,
-    output: `${legacyRepair.output}\n${result.output}\n${acpRepair.output}\n${authRepair.output}\n${sessionRepair.output}`,
+    output:
+      `${legacyRepair.output}\n${result.output}\n${acpRepair.output}\n` +
+      `${authRepair.output}\n${codexLogRepair.output}` +
+      `${codexLogRestartOutput}\n${sessionRepair.output}`,
   });
 });
 
@@ -3503,6 +3579,10 @@ const server = app.listen(PORT, () => {
           "Startup repair for placeholder provider auth",
         );
         log.info("wrapper", authRepair.output.trimEnd());
+        const codexLogRepair = await repairOversizedCodexLogDatabase(
+          "Startup repair for oversized Codex log database",
+        );
+        log.info("wrapper", codexLogRepair.output.trimEnd());
         const sessionRepair = await repairMissingCodexSessionTranscripts(
           "Startup repair for missing Codex session transcripts",
         );

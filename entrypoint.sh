@@ -19,6 +19,17 @@ chown -R openclaw:openclaw /data/.codex
 find /data/.codex -type d -exec chmod 700 {} +
 find /data/.codex -type f -exec chmod 600 {} +
 
+CODEX_LOG_DB_MAX_BYTES="${OPENCLAW_CODEX_LOG_DB_MAX_BYTES:-536870912}"
+if [ -f /data/.codex/logs_2.sqlite ]; then
+  CODEX_LOG_DB_BYTES="$(wc -c < /data/.codex/logs_2.sqlite | tr -d ' ')"
+  if [ "${CODEX_LOG_DB_BYTES:-0}" -gt "$CODEX_LOG_DB_MAX_BYTES" ]; then
+    rm -f /data/.codex/logs_2.sqlite \
+      /data/.codex/logs_2.sqlite-shm \
+      /data/.codex/logs_2.sqlite-wal
+  fi
+fi
+rm -rf /data/.codex/.tmp/* /data/.codex/tmp/*
+
 if [ -L /data/.linuxbrew ] && [ "$(readlink /data/.linuxbrew)" = "/data/.linuxbrew" ]; then
   rm -f /data/.linuxbrew
 fi
