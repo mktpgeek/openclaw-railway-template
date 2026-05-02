@@ -34,7 +34,7 @@ This template now configures OpenClaw ACP support as part of the normal setup fl
 - Codex CLI: `/usr/local/bin/codex` baked into the image
 - Codex home: persisted at `/data/.codex` by default on Railway
 - Codex workspace trust: `/data/workspace` is auto-added to `/data/.codex/config.toml`
-- If you choose `OpenAI Codex (ChatGPT OAuth)` during setup, leave the secret field empty. The wrapper will onboard without a provider secret, default the model to `openai-codex/gpt-5.4` unless you provide another `openai-codex/...` model, and sync the OpenClaw OAuth profile into `/data/.codex/auth.json` for Codex app-server runs.
+- If you choose `OpenAI Codex (ChatGPT OAuth)` during setup, leave the secret field empty. The wrapper will onboard without a provider secret, default the model to `openai-codex/gpt-5.5` unless you provide another `openai-codex/...` model, and sync the OpenClaw OAuth profile into `/data/.codex/auth.json` for Codex app-server runs.
 
 After setup, validate ACP from chat with:
 

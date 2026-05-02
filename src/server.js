@@ -197,7 +197,7 @@ const MODEL_AUTH_STORE_PATH = path.join(
   "agent",
   "auth-profiles.json",
 );
-const DEFAULT_OPENAI_CODEX_MODEL = "openai-codex/gpt-5.4";
+const DEFAULT_OPENAI_CODEX_MODEL = "openai-codex/gpt-5.5";
 const STALE_SESSION_TMP_MAX_AGE_MS = Number.parseInt(
   process.env.OPENCLAW_STALE_SESSION_TMP_MAX_AGE_MS ?? "600000",
   10,
@@ -671,7 +671,10 @@ function repairCodexAgentModelOverrides(config, targetModel) {
     if (agentId !== "codex" && runtimeId !== "codex") {
       continue;
     }
-    if (!model.startsWith("openai/")) {
+    if (model === normalizedTarget) {
+      continue;
+    }
+    if (!model.startsWith("openai/") && !model.startsWith("openai-codex/")) {
       continue;
     }
 
@@ -2256,7 +2259,7 @@ function resolveRequestedModel(payload) {
       return {
         ok: false,
         error:
-          "OpenAI Codex auth requires an openai-codex model. Use a model like openai-codex/gpt-5.4.",
+          "OpenAI Codex auth requires an openai-codex model. Use a model like openai-codex/gpt-5.5.",
       };
     }
     return { ok: true, model: normalized };
