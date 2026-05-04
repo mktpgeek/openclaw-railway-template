@@ -283,6 +283,10 @@ const DEFAULT_DISABLED_PLUGINS = parseListEnv(
   "OPENCLAW_DEFAULT_DISABLED_PLUGINS",
   RAILWAY_DEFAULT_DISABLED_PLUGINS,
 );
+const FORCE_DISABLED_PLUGINS = parseListEnv(
+  "OPENCLAW_FORCE_DISABLED_PLUGINS",
+  ["memory-core", "slack"],
+);
 
 const ACP_ALLOWED_AGENTS = [
   "claude",
@@ -2587,6 +2591,31 @@ async function repairLegacyTemplateConfig(
     }
   }
 
+  if (FORCE_DISABLED_PLUGINS.length > 0) {
+    if (!config.plugins || typeof config.plugins !== "object") {
+      config.plugins = {};
+    }
+    if (!config.plugins.entries || typeof config.plugins.entries !== "object") {
+      config.plugins.entries = {};
+    }
+
+    for (const pluginId of FORCE_DISABLED_PLUGINS) {
+      const entry = config.plugins.entries[pluginId];
+      if (!entry || typeof entry !== "object") {
+        config.plugins.entries[pluginId] = { enabled: false };
+        changed = true;
+        output += `[config repair] force-disabled plugin ${pluginId}\n`;
+        continue;
+      }
+
+      if (entry.enabled !== false) {
+        entry.enabled = false;
+        changed = true;
+        output += `[config repair] force-disabled plugin ${pluginId}\n`;
+      }
+    }
+  }
+
   if (!changed) {
     output += "[config repair] no template config changes needed\n";
     return { ok: true, changed: false, output };
@@ -2958,6 +2987,30 @@ async function repairAcpRuntimeConfig(reason = "Repairing ACP runtime config") {
   }
 
   output += "[acp runtime repair] bundled ACPX runtime no longer accepts legacy template plugin config keys; leaving plugins.entries.acpx.config empty\n";
+
+  const configWrites = [
+    ["config", "set", "acp.maxConcurrentSessions", String(ACP_MAX_CONCURRENT_SESSIONS)],
+    ["config", "set", "acp.runtime.ttlMinutes", String(ACP_RUNTIME_TTL_MINUTES)],
+    ["config", "set", "agents.defaults.maxConcurrent", String(AGENT_MAX_CONCURRENT)],
+    [
+      "config",
+      "set",
+      "agents.defaults.subagents.maxConcurrent",
+      String(AGENT_SUBAGENT_MAX_CONCURRENT),
+    ],
+    ["config", "set", "agents.defaults.thinkingDefault", AGENT_THINKING_DEFAULT],
+  ];
+
+  for (const args of configWrites) {
+    const result = await runCmd(OPENCLAW_NODE, clawArgs(args));
+    output += `[${args.slice(0, 3).join(" ")} ${args[3]}] exit=${result.code}\n`;
+    if (result.output) {
+      output += `${result.output}\n`;
+    }
+    if (result.code === 0) {
+      changed = true;
+    }
+  }
 
   return {
     ok: true,
