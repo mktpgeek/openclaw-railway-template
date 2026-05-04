@@ -183,6 +183,10 @@ const CODEX_LOG_DB_MAX_BYTES = parsePositiveIntegerEnv(
   "OPENCLAW_CODEX_LOG_DB_MAX_BYTES",
   512 * 1024 * 1024,
 );
+const VOLUME_JANITOR_INTERVAL_MS = parsePositiveIntegerEnv(
+  "OPENCLAW_VOLUME_JANITOR_INTERVAL_MS",
+  15 * 60 * 1000,
+);
 const CODEX_SESSIONS_STORE_PATH = path.join(
   STATE_DIR,
   "agents",
@@ -520,6 +524,75 @@ function cleanupStatePluginRuntimeDepsForExternalStageDir() {
   }
 }
 
+function cleanupCodexTransientFiles() {
+  const transientDirs = [
+    path.join(CODEX_HOME, ".tmp"),
+    path.join(CODEX_HOME, "tmp"),
+  ];
+  let removed = 0;
+  let freedBytes = 0;
+
+  for (const dirPath of transientDirs) {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const entryPath = path.join(dirPath, entry.name);
+      try {
+        freedBytes += rmPath(entryPath);
+        removed += 1;
+      } catch (err) {
+        log.warn("volume-cleanup", `failed to remove Codex transient ${entryPath}: ${err.message}`);
+      }
+    }
+  }
+
+  return { removed, freedBytes };
+}
+
+function cleanupVolumeTrash() {
+  let removed = 0;
+  let freedBytes = 0;
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(RAILWAY_VOLUME_PATH, { withFileTypes: true });
+  } catch {
+    return { removed, freedBytes };
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(".Trash-")) {
+      continue;
+    }
+
+    const trashDir = path.join(RAILWAY_VOLUME_PATH, entry.name);
+    let trashEntries = [];
+    try {
+      trashEntries = fs.readdirSync(trashDir, { withFileTypes: true });
+    } catch (err) {
+      log.warn("volume-cleanup", `failed to read trash directory ${trashDir}: ${err.message}`);
+      continue;
+    }
+
+    for (const trashEntry of trashEntries) {
+      const trashPath = path.join(trashDir, trashEntry.name);
+      try {
+        freedBytes += rmPath(trashPath);
+        removed += 1;
+      } catch (err) {
+        log.warn("volume-cleanup", `failed to empty trash path ${trashPath}: ${err.message}`);
+      }
+    }
+  }
+
+  return { removed, freedBytes };
+}
+
 function findFirstUnwritablePluginRuntimeDepsPath() {
   const depsDir = path.join(STATE_DIR, "plugin-runtime-deps");
   let entries = [];
@@ -575,12 +648,22 @@ async function cleanupVolumeBeforeBoot() {
   const pluginDeps = cleanupStalePluginRuntimeDeps(extractOpenclawVersion(version));
   const pluginStores = cleanupPluginRuntimePnpmStores();
   const externalPluginDeps = cleanupStatePluginRuntimeDepsForExternalStageDir();
-  const removed = sessions.removed + pluginDeps.removed + pluginStores.removed + externalPluginDeps.removed;
+  const codexTransient = cleanupCodexTransientFiles();
+  const trash = cleanupVolumeTrash();
+  const removed =
+    sessions.removed +
+    pluginDeps.removed +
+    pluginStores.removed +
+    externalPluginDeps.removed +
+    codexTransient.removed +
+    trash.removed;
   const freedBytes =
     sessions.freedBytes +
     pluginDeps.freedBytes +
     pluginStores.freedBytes +
-    externalPluginDeps.freedBytes;
+    externalPluginDeps.freedBytes +
+    codexTransient.freedBytes +
+    trash.freedBytes;
 
   if (removed === 0) {
     log.info("volume-cleanup", "no stale OpenClaw volume artifacts found");
@@ -591,7 +674,9 @@ async function cleanupVolumeBeforeBoot() {
     "volume-cleanup",
     `removed ${removed} stale artifacts, freeing about ${formatBytes(freedBytes)} ` +
       `(sessionTemp=${sessions.removed}, pluginRuntimeCaches=${pluginDeps.removed}, ` +
-      `pluginRuntimeStores=${pluginStores.removed}, externalPluginRuntimeCaches=${externalPluginDeps.removed})`,
+      `pluginRuntimeStores=${pluginStores.removed}, ` +
+      `externalPluginRuntimeCaches=${externalPluginDeps.removed}, ` +
+      `codexTransient=${codexTransient.removed}, trash=${trash.removed})`,
   );
 }
 
@@ -1776,6 +1861,75 @@ async function restartGateway() {
   await runCmd(OPENCLAW_NODE, clawArgs(["gateway", "stop"]));
   gatewayRestartCount = 0;
   return ensureGatewayRunning();
+}
+
+let volumeJanitorRunning = false;
+
+function getCodexLogDatabaseSize() {
+  try {
+    return fs.statSync(CODEX_LOG_DB_PATH).size;
+  } catch (err) {
+    if (err?.code === "ENOENT") return 0;
+    log.warn("volume-janitor", `failed to stat Codex log database: ${err.message}`);
+    return 0;
+  }
+}
+
+async function stopGatewayForMaintenance(reason) {
+  log.warn("volume-janitor", `stopping gateway for maintenance: ${reason}`);
+  if (gatewayProc) {
+    intentionalRestart = true;
+    try {
+      gatewayProc.kill("SIGTERM");
+    } catch (err) {
+      log.warn("volume-janitor", `gateway kill error: ${err.message}`);
+    }
+    await sleep(5000);
+    gatewayProc = null;
+    intentionalRestart = false;
+  }
+
+  const stopResult = await runCmd(OPENCLAW_NODE, clawArgs(["gateway", "stop"]));
+  log.info("volume-janitor", `gateway stop exit=${stopResult.code}`);
+}
+
+async function runVolumeJanitor(reason = "Periodic volume janitor") {
+  if (volumeJanitorRunning || shuttingDown || !isConfigured()) {
+    return;
+  }
+
+  volumeJanitorRunning = true;
+  try {
+    const codexLogBytes = getCodexLogDatabaseSize();
+    const shouldRotateCodexLog = codexLogBytes > CODEX_LOG_DB_MAX_BYTES;
+
+    if (shouldRotateCodexLog) {
+      await stopGatewayForMaintenance(
+        `Codex log database reached ${formatBytes(codexLogBytes)}`,
+      );
+    }
+
+    const codexLogRepair = await repairOversizedCodexLogDatabase(reason);
+    log.info("volume-janitor", codexLogRepair.output.trimEnd());
+
+    await cleanupVolumeBeforeBoot();
+
+    if (shouldRotateCodexLog) {
+      await ensureGatewayRunning();
+      log.info("volume-janitor", "gateway restarted after volume cleanup");
+    }
+  } catch (err) {
+    log.warn("volume-janitor", `cleanup failed: ${err.message}`);
+    if (!gatewayProc && isConfigured() && !shuttingDown) {
+      try {
+        await ensureGatewayRunning();
+      } catch (restartErr) {
+        log.error("volume-janitor", `gateway restart after cleanup failure failed: ${restartErr.message}`);
+      }
+    }
+  } finally {
+    volumeJanitorRunning = false;
+  }
 }
 
 const setupRateLimiter = {
@@ -3650,6 +3804,13 @@ const server = app.listen(PORT, () => {
   }
 });
 
+const volumeJanitorInterval = setInterval(() => {
+  runVolumeJanitor("Periodic Railway volume janitor").catch((err) => {
+    log.warn("volume-janitor", `periodic cleanup failed: ${err.message}`);
+  });
+}, VOLUME_JANITOR_INTERVAL_MS);
+volumeJanitorInterval.unref?.();
+
 const tuiWss = createTuiWebSocketServer(server);
 
 server.on("upgrade", async (req, socket, head) => {
@@ -3700,6 +3861,9 @@ async function gracefulShutdown(signal) {
 
   if (setupRateLimiter.cleanupInterval) {
     clearInterval(setupRateLimiter.cleanupInterval);
+  }
+  if (volumeJanitorInterval) {
+    clearInterval(volumeJanitorInterval);
   }
 
   if (activeTuiSession) {
