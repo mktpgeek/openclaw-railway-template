@@ -171,7 +171,7 @@ const AGENT_SUBAGENT_MAX_CONCURRENT = parsePositiveIntegerEnv(
 const AGENT_THINKING_DEFAULT =
   process.env.OPENCLAW_AGENT_THINKING_DEFAULT?.trim() || "high";
 const CODEX_CLI_VERSION =
-  process.env.OPENCLAW_CODEX_CLI_VERSION?.trim() || "0.132.0";
+  process.env.OPENCLAW_CODEX_CLI_VERSION?.trim() || "0.134.0";
 const RAILWAY_VOLUME_PATH =
   process.env.RAILWAY_VOLUME_MOUNT_PATH?.trim() || "/data";
 const CODEX_HOME =

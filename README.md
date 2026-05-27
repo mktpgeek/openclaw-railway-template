@@ -104,7 +104,7 @@ The web TUI implements multiple security layers:
 | `OPENCLAW_AGENT_MAX_CONCURRENT` | `2` | Default OpenClaw agent session concurrency cap |
 | `OPENCLAW_AGENT_SUBAGENT_MAX_CONCURRENT` | `2` | Default subagent fanout cap |
 | `OPENCLAW_AGENT_THINKING_DEFAULT` | `high` | Default thinking level for new/repaired setups |
-| `OPENCLAW_CODEX_CLI_VERSION` | `0.132.0` | Codex CLI version baked into the image / installed during ACP bootstrap |
+| `OPENCLAW_CODEX_CLI_VERSION` | `0.134.0` | Codex CLI version baked into the image / installed during ACP bootstrap |
 | `OPENCLAW_CODEX_LOG_DB_MAX_BYTES` | `536870912` (512 MB) | Maximum persisted Codex log database size before the wrapper rotates it |
 | `OPENCLAW_VOLUME_JANITOR_INTERVAL_MS` | `900000` (15 min) | How often the wrapper checks Railway volume pressure and transient cleanup |
 | `OPENCLAW_DEFAULT_DISABLED_PLUGINS` | Telegram/Codex-only profile | Comma-separated OpenClaw plugins the wrapper disables on first repair unless explicitly configured |
