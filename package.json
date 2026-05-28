@@ -15,8 +15,5 @@
     "http-proxy": "^1.18.1",
     "node-pty": "^1.0.0",
     "ws": "^8.18.0"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": ["node-pty"]
   }
 }
