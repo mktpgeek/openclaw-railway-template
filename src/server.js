@@ -558,6 +558,107 @@ function cleanupCodexTransientFiles() {
   return { removed, freedBytes };
 }
 
+function listCodexHomeDirs() {
+  const dirs = new Set([path.resolve(CODEX_HOME)]);
+  const agentsDir = path.join(STATE_DIR, "agents");
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(agentsDir, { withFileTypes: true });
+  } catch {
+    return [...dirs];
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    dirs.add(path.resolve(path.join(agentsDir, entry.name, "agent", "codex-home")));
+  }
+
+  return [...dirs];
+}
+
+function listCodexLogDatabasePaths() {
+  const databasePaths = new Set([path.resolve(CODEX_LOG_DB_PATH)]);
+
+  for (const homeDir of listCodexHomeDirs()) {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(homeDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isFile() || !/^logs_\d+\.sqlite$/.test(entry.name)) {
+        continue;
+      }
+      databasePaths.add(path.resolve(path.join(homeDir, entry.name)));
+    }
+  }
+
+  return [...databasePaths];
+}
+
+function getCodexLogDatabaseStats() {
+  const stats = [];
+
+  for (const databasePath of listCodexLogDatabasePaths()) {
+    try {
+      const stat = fs.statSync(databasePath);
+      if (stat.isFile()) {
+        stats.push({ path: databasePath, size: stat.size });
+      }
+    } catch (err) {
+      if (err?.code !== "ENOENT") {
+        log.warn("volume-janitor", `failed to stat Codex log database ${databasePath}: ${err.message}`);
+      }
+    }
+  }
+
+  return stats.sort((a, b) => b.size - a.size);
+}
+
+function removeCodexLogDatabase(databasePath) {
+  let freedBytes = 0;
+  const errors = [];
+  const paths = [
+    databasePath,
+    `${databasePath}-shm`,
+    `${databasePath}-wal`,
+  ];
+
+  for (const filePath of paths) {
+    try {
+      freedBytes += getPathSize(filePath);
+      fs.rmSync(filePath, { force: true });
+    } catch (err) {
+      errors.push(`${filePath}: ${err.message}`);
+    }
+  }
+
+  return { freedBytes, errors };
+}
+
+function cleanupOversizedCodexLogDatabases() {
+  const stats = getCodexLogDatabaseStats();
+  const oversized = stats.filter((stat) => stat.size > CODEX_LOG_DB_MAX_BYTES);
+  const errors = [];
+  let removed = 0;
+  let freedBytes = 0;
+
+  for (const stat of oversized) {
+    const result = removeCodexLogDatabase(stat.path);
+    freedBytes += result.freedBytes;
+    if (result.errors.length > 0) {
+      errors.push(...result.errors);
+      continue;
+    }
+    removed += 1;
+  }
+
+  return { stats, oversized, removed, freedBytes, errors };
+}
+
 function cleanupVolumeTrash() {
   let removed = 0;
   let freedBytes = 0;
@@ -648,6 +749,7 @@ function exitIfPluginRuntimeDepsUnwritable() {
 
 async function cleanupVolumeBeforeBoot() {
   const sessions = cleanupStaleSessionTempFiles();
+  const codexLogs = cleanupOversizedCodexLogDatabases();
   const { version } = await getOpenclawInfo();
   const pluginDeps = cleanupStalePluginRuntimeDeps(extractOpenclawVersion(version));
   const pluginStores = cleanupPluginRuntimePnpmStores();
@@ -656,6 +758,7 @@ async function cleanupVolumeBeforeBoot() {
   const trash = cleanupVolumeTrash();
   const removed =
     sessions.removed +
+    codexLogs.removed +
     pluginDeps.removed +
     pluginStores.removed +
     externalPluginDeps.removed +
@@ -663,11 +766,16 @@ async function cleanupVolumeBeforeBoot() {
     trash.removed;
   const freedBytes =
     sessions.freedBytes +
+    codexLogs.freedBytes +
     pluginDeps.freedBytes +
     pluginStores.freedBytes +
     externalPluginDeps.freedBytes +
     codexTransient.freedBytes +
     trash.freedBytes;
+
+  for (const error of codexLogs.errors) {
+    log.warn("volume-cleanup", `failed to remove oversized Codex log database ${error}`);
+  }
 
   if (removed === 0) {
     log.info("volume-cleanup", "no stale OpenClaw volume artifacts found");
@@ -677,7 +785,8 @@ async function cleanupVolumeBeforeBoot() {
   log.info(
     "volume-cleanup",
     `removed ${removed} stale artifacts, freeing about ${formatBytes(freedBytes)} ` +
-      `(sessionTemp=${sessions.removed}, pluginRuntimeCaches=${pluginDeps.removed}, ` +
+      `(sessionTemp=${sessions.removed}, codexLogs=${codexLogs.removed}, ` +
+      `pluginRuntimeCaches=${pluginDeps.removed}, ` +
       `pluginRuntimeStores=${pluginStores.removed}, ` +
       `externalPluginRuntimeCaches=${externalPluginDeps.removed}, ` +
       `codexTransient=${codexTransient.removed}, trash=${trash.removed})`,
@@ -1276,43 +1385,45 @@ async function repairOversizedCodexLogDatabase(
     `[codex log repair] ${reason} ` +
     `(max ${formatBytes(CODEX_LOG_DB_MAX_BYTES)})\n`;
 
-  let stat;
-  try {
-    stat = fs.statSync(CODEX_LOG_DB_PATH);
-  } catch (err) {
-    if (err?.code === "ENOENT") {
-      output += "[codex log repair] no Codex log database found\n";
-      return { ok: true, changed: false, output };
-    }
-    output += `[codex log repair] stat failed: ${err.message}\n`;
-    return { ok: false, changed: false, output };
+  const cleanup = cleanupOversizedCodexLogDatabases();
+  if (cleanup.stats.length === 0) {
+    output += "[codex log repair] no Codex log database found\n";
+    return { ok: true, changed: false, output };
   }
 
-  if (stat.size <= CODEX_LOG_DB_MAX_BYTES) {
+  if (cleanup.oversized.length === 0) {
+    const largest = cleanup.stats[0];
     output +=
-      `[codex log repair] Codex log database is ${formatBytes(stat.size)}; ` +
+      `[codex log repair] largest Codex log database is ${formatBytes(largest.size)} ` +
+      `at ${largest.path}; ` +
       "no cleanup needed\n";
     return { ok: true, changed: false, output };
   }
 
-  const paths = [
-    CODEX_LOG_DB_PATH,
-    `${CODEX_LOG_DB_PATH}-shm`,
-    `${CODEX_LOG_DB_PATH}-wal`,
-  ];
-
-  try {
-    for (const filePath of paths) {
-      fs.rmSync(filePath, { force: true });
-    }
+  if (cleanup.removed > 0) {
     output +=
-      `[codex log repair] removed oversized Codex log database ` +
-      `(${formatBytes(stat.size)})\n`;
-    return { ok: true, changed: true, output };
-  } catch (err) {
-    output += `[codex log repair] cleanup failed: ${err.message}\n`;
-    return { ok: false, changed: false, output };
+      `[codex log repair] removed ${cleanup.removed} oversized Codex log ` +
+      `database${cleanup.removed === 1 ? "" : "s"}, freeing about ` +
+      `${formatBytes(cleanup.freedBytes)}\n`;
   }
+
+  for (const stat of cleanup.oversized.slice(0, 10)) {
+    output +=
+      `[codex log repair] oversized: ${formatBytes(stat.size)} ${stat.path}\n`;
+  }
+  if (cleanup.oversized.length > 10) {
+    output +=
+      `[codex log repair] ...and ${cleanup.oversized.length - 10} more\n`;
+  }
+  for (const error of cleanup.errors) {
+    output += `[codex log repair] cleanup failed: ${error}\n`;
+  }
+
+  return {
+    ok: cleanup.errors.length === 0,
+    changed: cleanup.removed > 0,
+    output,
+  };
 }
 
 function buildChildEnv(extra = {}, opts = {}) {
@@ -1869,14 +1980,8 @@ async function restartGateway() {
 
 let volumeJanitorRunning = false;
 
-function getCodexLogDatabaseSize() {
-  try {
-    return fs.statSync(CODEX_LOG_DB_PATH).size;
-  } catch (err) {
-    if (err?.code === "ENOENT") return 0;
-    log.warn("volume-janitor", `failed to stat Codex log database: ${err.message}`);
-    return 0;
-  }
+function getLargestCodexLogDatabase() {
+  return getCodexLogDatabaseStats()[0] || { path: null, size: 0 };
 }
 
 async function stopGatewayForMaintenance(reason) {
@@ -1904,12 +2009,13 @@ async function runVolumeJanitor(reason = "Periodic volume janitor") {
 
   volumeJanitorRunning = true;
   try {
-    const codexLogBytes = getCodexLogDatabaseSize();
-    const shouldRotateCodexLog = codexLogBytes > CODEX_LOG_DB_MAX_BYTES;
+    const largestCodexLog = getLargestCodexLogDatabase();
+    const shouldRotateCodexLog = largestCodexLog.size > CODEX_LOG_DB_MAX_BYTES;
 
     if (shouldRotateCodexLog) {
       await stopGatewayForMaintenance(
-        `Codex log database reached ${formatBytes(codexLogBytes)}`,
+        `Codex log database ${largestCodexLog.path} reached ` +
+          `${formatBytes(largestCodexLog.size)}`,
       );
     }
 
