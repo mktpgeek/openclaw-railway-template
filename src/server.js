@@ -980,9 +980,6 @@ function repairCodexAgentModelOverrides(config, targetModel) {
     const agentId = String(agent.id ?? "").trim();
     const runtimeId = String(agent.agentRuntime?.id ?? "").trim();
     const model = String(agent.model ?? "").trim();
-    if (agentId !== "codex" && runtimeId !== "codex") {
-      continue;
-    }
     if (model === normalizedTarget) {
       continue;
     }
