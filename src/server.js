@@ -201,7 +201,7 @@ const MODEL_AUTH_STORE_PATH = path.join(
   "agent",
   "auth-profiles.json",
 );
-const DEFAULT_OPENAI_CODEX_MODEL = "openai-codex/gpt-5.5";
+const DEFAULT_OPENAI_CODEX_MODEL = "openai/gpt-5.5";
 const STALE_SESSION_TMP_MAX_AGE_MS = Number.parseInt(
   process.env.OPENCLAW_STALE_SESSION_TMP_MAX_AGE_MS ?? "600000",
   10,
@@ -820,12 +820,129 @@ function normalizeOpenaiCodexModel(model) {
     return DEFAULT_OPENAI_CODEX_MODEL;
   }
   if (normalized.startsWith("openai-codex/")) {
-    return normalized;
+    return `openai/${normalized.slice("openai-codex/".length)}`;
   }
   if (normalized.startsWith("openai/")) {
-    return `openai-codex/${normalized.slice("openai/".length)}`;
+    return normalized;
   }
   return "";
+}
+
+function ensureCodexOpenaiRuntime(config) {
+  if (!config.models || typeof config.models !== "object") {
+    config.models = {};
+  }
+  if (!config.models.providers || typeof config.models.providers !== "object") {
+    config.models.providers = {};
+  }
+  if (!config.models.providers.openai || typeof config.models.providers.openai !== "object") {
+    config.models.providers.openai = {};
+  }
+
+  const provider = config.models.providers.openai;
+  if (!provider.agentRuntime || typeof provider.agentRuntime !== "object") {
+    provider.agentRuntime = {};
+  }
+  if (provider.agentRuntime.id === "codex") {
+    return false;
+  }
+
+  provider.agentRuntime.id = "codex";
+  return true;
+}
+
+function collectAgentModelOwners(config) {
+  const owners = [];
+  if (config?.agents?.defaults && typeof config.agents.defaults === "object") {
+    owners.push({ id: "agents.defaults", value: config.agents.defaults });
+  }
+  if (Array.isArray(config?.agents?.list)) {
+    for (const agent of config.agents.list) {
+      if (agent && typeof agent === "object") {
+        owners.push({ id: `agents.list.${agent.id || "unknown"}`, value: agent });
+      }
+    }
+  }
+
+  return owners;
+}
+
+function removeStaleCodexModelRuntimePins(config) {
+  const owners = collectAgentModelOwners(config);
+  const changed = [];
+  for (const owner of owners) {
+    const models = owner.value.models;
+    if (!models || typeof models !== "object") {
+      continue;
+    }
+
+    for (const [modelRef, entry] of Object.entries(models)) {
+      if (!modelRef.startsWith("openai/") && !modelRef.startsWith("openai-codex/")) {
+        continue;
+      }
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+      if (entry.agentRuntime?.id !== "codex") {
+        continue;
+      }
+
+      delete entry.agentRuntime;
+      if (Object.keys(entry).length === 0) {
+        delete models[modelRef];
+      }
+      changed.push(`${owner.id}.models.${modelRef}.agentRuntime`);
+    }
+  }
+
+  return changed;
+}
+
+function migrateLegacyOpenaiCodexModelEntries(config) {
+  const changed = [];
+  for (const owner of collectAgentModelOwners(config)) {
+    const models = owner.value.models;
+    if (!models || typeof models !== "object") {
+      continue;
+    }
+
+    for (const [modelRef, entry] of Object.entries(models)) {
+      if (!modelRef.startsWith("openai-codex/")) {
+        continue;
+      }
+
+      const migratedRef = normalizeOpenaiCodexModel(modelRef);
+      if (!migratedRef) {
+        continue;
+      }
+
+      const migratedEntry =
+        entry && typeof entry === "object" && !Array.isArray(entry)
+          ? { ...entry }
+          : {};
+      if (migratedEntry.agentRuntime?.id === "codex") {
+        delete migratedEntry.agentRuntime;
+      }
+
+      if (Object.keys(migratedEntry).length > 0) {
+        const existingEntry = models[migratedRef];
+        models[migratedRef] =
+          existingEntry && typeof existingEntry === "object" && !Array.isArray(existingEntry)
+            ? { ...migratedEntry, ...existingEntry }
+            : migratedEntry;
+      }
+
+      delete models[modelRef];
+      changed.push({
+        ownerId: owner.id,
+        from: modelRef,
+        to: migratedRef,
+        migratedConfig: Object.keys(migratedEntry).length > 0,
+      });
+    }
+  }
+
+  return changed;
 }
 
 function toRfc3339(value) {
@@ -1268,8 +1385,8 @@ async function repairModelAuth(reason = "Repairing model auth") {
   if (
     hasOpenaiCodexOauth &&
     currentModel &&
-    currentModel.startsWith("openai/") &&
-    (hasOpenaiPlaceholder || !hasOpenaiCredential)
+    (currentModel.startsWith("openai/") || currentModel.startsWith("openai-codex/")) &&
+    (currentModel.startsWith("openai-codex/") || hasOpenaiPlaceholder || !hasOpenaiCredential)
   ) {
     const preferredModel = normalizeOpenaiCodexModel(currentModel);
     const setResult = await setDefaultModelWithFallback(preferredModel);
@@ -1281,25 +1398,64 @@ async function repairModelAuth(reason = "Repairing model auth") {
       changed = true;
       output += `[model auth repair] switched default model from ${currentModel} to ${setResult.model}\n`;
     } else {
-      output += "[model auth repair] unable to switch to an openai-codex model automatically\n";
+      output += "[model auth repair] unable to switch to an OpenAI model automatically\n";
     }
   } else if (hasOpenaiPlaceholder && !hasOpenaiCodexOauth) {
     output += "[model auth repair] removed placeholder OpenAI auth, but no openai-codex OAuth profile was available for automatic migration\n";
   }
 
   const latestConfig = readConfig();
-  const codexTargetModel = getConfiguredModel() || DEFAULT_OPENAI_CODEX_MODEL;
-  if (hasOpenaiCodexOauth && codexTargetModel.startsWith("openai-codex/")) {
+  const codexTargetModel = normalizeOpenaiCodexModel(
+    getConfiguredModel() || DEFAULT_OPENAI_CODEX_MODEL,
+  );
+  if (
+    latestConfig &&
+    typeof latestConfig === "object" &&
+    hasOpenaiCodexOauth &&
+    codexTargetModel.startsWith("openai/")
+  ) {
+    const runtimeChanged = ensureCodexOpenaiRuntime(latestConfig);
+    if (runtimeChanged) {
+      changed = true;
+      output += "[model auth repair] set models.providers.openai.agentRuntime.id to \"codex\"\n";
+    }
+
+    const staleRuntimePins = removeStaleCodexModelRuntimePins(latestConfig);
+    if (staleRuntimePins.length > 0) {
+      changed = true;
+      for (const pin of staleRuntimePins) {
+        output += `[model auth repair] removed stale ${pin}\n`;
+      }
+    }
+
+    const legacyModelEntries = migrateLegacyOpenaiCodexModelEntries(latestConfig);
+    if (legacyModelEntries.length > 0) {
+      changed = true;
+      for (const entry of legacyModelEntries) {
+        const action = entry.migratedConfig ? "migrated" : "removed";
+        output += `[model auth repair] ${action} legacy ${entry.ownerId}.models.${entry.from}`;
+        output += ` (canonical model: ${entry.to})\n`;
+      }
+    }
+
     const agentModelChanges = repairCodexAgentModelOverrides(
       latestConfig,
       codexTargetModel,
     );
     if (agentModelChanges.length > 0) {
-      writeJsonFile(configPath(), latestConfig);
       changed = true;
       for (const change of agentModelChanges) {
         output += `[model auth repair] switched ${change.agentId} agent model from ${change.from} to ${change.to}\n`;
       }
+    }
+
+    if (
+      runtimeChanged ||
+      staleRuntimePins.length > 0 ||
+      legacyModelEntries.length > 0 ||
+      agentModelChanges.length > 0
+    ) {
+      writeJsonFile(configPath(), latestConfig);
     }
   }
 
@@ -2523,7 +2679,7 @@ function resolveRequestedModel(payload) {
       return {
         ok: false,
         error:
-          "OpenAI Codex auth requires an openai-codex model. Use a model like openai-codex/gpt-5.5.",
+          "OpenAI Codex auth requires an OpenAI model. Use a model like openai/gpt-5.5.",
       };
     }
     return { ok: true, model: normalized };

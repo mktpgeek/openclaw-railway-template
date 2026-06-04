@@ -11,6 +11,15 @@ fi
 chown -R openclaw:openclaw /data
 chmod 700 /data
 
+for trusted_plugin_dir in \
+  /data/.openclaw/npm/node_modules/@openclaw/acpx \
+  /data/.openclaw/npm/node_modules/@openclaw/codex
+do
+  if [ -d "$trusted_plugin_dir" ]; then
+    chown -R root:root "$trusted_plugin_dir"
+  fi
+done
+
 mkdir -p /data/.config
 chown -R openclaw:openclaw /data/.config
 

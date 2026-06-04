@@ -34,7 +34,7 @@ This template now configures OpenClaw ACP support as part of the normal setup fl
 - Codex CLI: `/usr/local/bin/codex` baked into the image
 - Codex home: persisted at `/data/.codex` by default on Railway
 - Codex workspace trust: `/data/workspace` is auto-added to `/data/.codex/config.toml`
-- If you choose `OpenAI Codex (ChatGPT OAuth)` during setup, leave the secret field empty. The wrapper will onboard without a provider secret, default the model to `openai-codex/gpt-5.5` unless you provide another `openai-codex/...` model, and sync the OpenClaw OAuth profile into `/data/.codex/auth.json` for Codex app-server runs.
+- If you choose `OpenAI Codex (ChatGPT OAuth)` during setup, leave the secret field empty. The wrapper will onboard without a provider secret, default the model to `openai/gpt-5.5` unless you provide another `openai/...` model, configure the OpenAI provider to use the Codex runtime, and sync the OpenClaw OAuth profile into `/data/.codex/auth.json` for Codex app-server runs.
 
 After setup, validate ACP from chat with:
 
@@ -49,7 +49,7 @@ Then try:
 /acp spawn claude --mode persistent --thread auto
 ```
 
-For `codex` on Railway, you still need a real `OPENAI_API_KEY` or `CODEX_API_KEY`. A placeholder like `not-needed` will let ACP boot but Codex harness sessions will fail when they try to authenticate.
+For `codex` on Railway, keep the OpenAI Codex OAuth profile current. Placeholder API keys like `not-needed` are removed automatically, but expired ChatGPT OAuth tokens still need to be refreshed through OpenClaw model auth.
 
 ## Getting chat tokens (so you don't have to scramble)
 
@@ -174,7 +174,7 @@ A: ACP still needs harness-side auth on the host. The OpenClaw gateway model you
 
 **Q: I see `401 Incorrect API key provided: not-needed`. How do I fix it?**
 
-A: Redeploy the latest template and let it boot once. On startup, the wrapper now removes placeholder auth profiles like `not-needed` and, when Codex OAuth is available, migrates `openai/...` defaults onto the matching `openai-codex/...` model so the gateway stops trying to use a fake OpenAI API key. If you really want the `openai/...` provider instead, rerun setup with a real OpenAI API key.
+A: Redeploy the latest template and let it boot once. On startup, the wrapper removes placeholder auth profiles like `not-needed` and, when Codex OAuth is available, migrates legacy `openai-codex/...` defaults onto the canonical `openai/...` model with the Codex runtime configured at `models.providers.openai.agentRuntime.id`. If you want plain OpenAI API-key auth instead, rerun setup with a real OpenAI API key.
 
 **Q: How do I access configuration after the initial setup?**
 
