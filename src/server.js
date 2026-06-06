@@ -1865,6 +1865,15 @@ async function startGateway() {
     log.warn("gateway", `failed to prepare Codex config: ${codexTrust.error}`);
   }
 
+  try {
+    const authRepair = await repairModelAuth(
+      "Gateway start repair for model auth",
+    );
+    log.info("gateway", authRepair.output.trimEnd());
+  } catch (err) {
+    log.warn("gateway", `model auth repair before start failed: ${err.message}`);
+  }
+
   const stopResult = await runCmd(OPENCLAW_NODE, clawArgs(["gateway", "stop"]));
   log.info("gateway", `stop existing gateway exit=${stopResult.code}`);
 
