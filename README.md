@@ -28,9 +28,10 @@ This template now configures OpenClaw ACP support as part of the normal setup fl
 
 - Backend: `acpx`
 - Default agent: `codex` unless overridden with `OPENCLAW_ACP_DEFAULT_AGENT`
+- Default ACP permissions: `approve-all` with non-interactive prompts denied
 - Allowed agents: `claude`, `codex`, `copilot`, `cursor`, `droid`, `gemini`, `iflow`, `kilocode`, `kimi`, `kiro`, `openclaw`, `opencode`, `pi`, `qwen`
 - Runtime command: `/usr/local/bin/acpx` baked into the image
-- ACPX runtime schema: managed by bundled OpenClaw/ACPX; the template intentionally avoids legacy `plugins.entries.acpx.config` writes
+- ACPX runtime schema: managed by bundled OpenClaw/ACPX; the template only writes current permission keys
 - Codex CLI: `/usr/local/bin/codex` baked into the image
 - Codex home: persisted at `/data/.codex` by default on Railway
 - Codex workspace trust: `/data/workspace` is auto-added to `/data/.codex/config.toml`
@@ -99,6 +100,8 @@ The web TUI implements multiple security layers:
 | `TUI_IDLE_TIMEOUT_MS` | `300000` (5 min) | Closes session after inactivity |
 | `TUI_MAX_SESSION_MS` | `1800000` (30 min) | Maximum session duration |
 | `OPENCLAW_ACP_DEFAULT_AGENT` | `codex` | Default ACP harness when one is not specified |
+| `OPENCLAW_ACP_PERMISSION_MODE` | `approve-all` | ACPX permission profile for background agent sessions |
+| `OPENCLAW_ACP_NON_INTERACTIVE_PERMISSIONS` | `deny` | Behavior when a harness would otherwise prompt |
 | `OPENCLAW_ACP_MAX_CONCURRENT_SESSIONS` | `2` | ACP session concurrency cap |
 | `OPENCLAW_ACP_RUNTIME_TTL_MINUTES` | `60` | ACP session TTL |
 | `OPENCLAW_AGENT_MAX_CONCURRENT` | `2` | Default OpenClaw agent session concurrency cap |

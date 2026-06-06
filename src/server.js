@@ -149,6 +149,8 @@ const ACP_DEFAULT_AGENT =
   process.env.OPENCLAW_ACP_DEFAULT_AGENT?.trim() || "codex";
 const ACP_PERMISSION_MODE =
   process.env.OPENCLAW_ACP_PERMISSION_MODE?.trim() || "approve-all";
+const ACP_NON_INTERACTIVE_PERMISSIONS =
+  process.env.OPENCLAW_ACP_NON_INTERACTIVE_PERMISSIONS?.trim() || "deny";
 const ACP_PLUGIN_TOOLS_MCP_BRIDGE =
   process.env.OPENCLAW_ACP_PLUGIN_TOOLS_MCP_BRIDGE?.toLowerCase() === "true";
 const ACP_MAX_CONCURRENT_SESSIONS = parsePositiveIntegerEnv(
@@ -1014,14 +1016,17 @@ function repairCodexAgentModelOverrides(config, targetModel) {
   return changed;
 }
 
-function getOpenaiCodexOauthProfile(authStore) {
+function getCodexCompatibleOauthProfile(authStore) {
   const profiles = authStore?.profiles;
   if (!profiles || typeof profiles !== "object") {
     return null;
   }
 
   for (const [profileId, profile] of Object.entries(profiles)) {
-    if (profile?.provider !== "openai-codex" || profile?.type !== "oauth") {
+    if (
+      (profile?.provider !== "openai-codex" && profile?.provider !== "openai") ||
+      profile?.type !== "oauth"
+    ) {
       continue;
     }
 
@@ -1059,7 +1064,7 @@ function getOpenaiCodexOauthProfile(authStore) {
 }
 
 function syncCodexCliAuthFromOpenClawProfile(authStore) {
-  const profile = getOpenaiCodexOauthProfile(authStore);
+  const profile = getCodexCompatibleOauthProfile(authStore);
   if (!profile) {
     return { ok: true, changed: false, profileId: "", reason: "no-profile" };
   }
@@ -1365,7 +1370,9 @@ async function repairModelAuth(reason = "Repairing model auth") {
   const hasOpenaiPlaceholder = removedProfiles.some((profileId) => (
     profileId === "openai:default" || profileId.startsWith("openai:")
   ));
-  const hasOpenaiCodexOauth = hasOauthProfile(authStore, "openai-codex");
+  const hasOpenaiCodexOauth =
+    hasOauthProfile(authStore, "openai-codex") ||
+    hasOauthProfile(authStore, "openai");
   const hasOpenaiCredential =
     hasProviderCredential(authStore, "openai") ||
     Boolean(
@@ -2830,8 +2837,6 @@ async function repairLegacyTemplateConfig(
   if (acpxConfig && typeof acpxConfig === "object") {
     const staleKeys = [
       "pluginToolsMcpBridge",
-      "permissionMode",
-      "nonInteractivePermissions",
       "command",
       "expectedVersion",
     ];
@@ -3224,6 +3229,13 @@ async function configureAcpSupport() {
     ["config", "set", "session.threadBindings.enabled", "true"],
     ["config", "set", "session.threadBindings.idleHours", "24"],
     ["config", "set", "session.threadBindings.maxAgeHours", "0"],
+    ["config", "set", "plugins.entries.acpx.config.permissionMode", ACP_PERMISSION_MODE],
+    [
+      "config",
+      "set",
+      "plugins.entries.acpx.config.nonInteractivePermissions",
+      ACP_NON_INTERACTIVE_PERMISSIONS,
+    ],
   ];
 
   for (const args of configWrites) {
@@ -3264,7 +3276,7 @@ async function repairAcpRuntimeConfig(reason = "Repairing ACP runtime config") {
     changed = true;
   }
 
-  output += "[acp runtime repair] bundled ACPX runtime no longer accepts legacy template plugin config keys; leaving plugins.entries.acpx.config empty\n";
+  output += "[acp runtime repair] applying ACPX runtime permission defaults\n";
 
   const configWrites = [
     ["config", "set", "acp.maxConcurrentSessions", String(ACP_MAX_CONCURRENT_SESSIONS)],
@@ -3277,6 +3289,13 @@ async function repairAcpRuntimeConfig(reason = "Repairing ACP runtime config") {
       String(AGENT_SUBAGENT_MAX_CONCURRENT),
     ],
     ["config", "set", "agents.defaults.thinkingDefault", AGENT_THINKING_DEFAULT],
+    ["config", "set", "plugins.entries.acpx.config.permissionMode", ACP_PERMISSION_MODE],
+    [
+      "config",
+      "set",
+      "plugins.entries.acpx.config.nonInteractivePermissions",
+      ACP_NON_INTERACTIVE_PERMISSIONS,
+    ],
   ];
 
   for (const args of configWrites) {
