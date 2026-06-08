@@ -289,6 +289,8 @@ const FORCE_DISABLED_PLUGINS = parseListEnv(
   "OPENCLAW_FORCE_DISABLED_PLUGINS",
   ["memory-core", "slack"],
 );
+const DISABLE_USER_MCP_SERVERS =
+  process.env.OPENCLAW_DISABLE_USER_MCP_SERVERS?.toLowerCase() !== "false";
 
 const ACP_ALLOWED_AGENTS = [
   "claude",
@@ -2847,6 +2849,19 @@ async function repairLegacyTemplateConfig(
         output += `[config repair] removed plugins.entries.acpx.config.${key}\n`;
       }
     }
+  }
+
+  const mcpServers = config?.mcp?.servers;
+  if (
+    DISABLE_USER_MCP_SERVERS &&
+    mcpServers &&
+    typeof mcpServers === "object" &&
+    Object.keys(mcpServers).length > 0
+  ) {
+    const serverCount = Object.keys(mcpServers).length;
+    config.mcp.servers = {};
+    changed = true;
+    output += `[config repair] disabled ${serverCount} configured MCP server(s) for Railway process limits\n`;
   }
 
   if (DEFAULT_DISABLED_PLUGINS.length > 0) {

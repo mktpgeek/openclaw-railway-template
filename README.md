@@ -112,6 +112,7 @@ The web TUI implements multiple security layers:
 | `OPENCLAW_VOLUME_JANITOR_INTERVAL_MS` | `900000` (15 min) | How often the wrapper checks Railway volume pressure and transient cleanup |
 | `OPENCLAW_DEFAULT_DISABLED_PLUGINS` | Telegram/Codex-only profile | Comma-separated OpenClaw plugins the wrapper disables on first repair unless explicitly configured |
 | `OPENCLAW_FORCE_DISABLED_PLUGINS` | `memory-core,slack` | Plugins the wrapper keeps disabled for low-memory Railway deployments unless you override with an empty value |
+| `OPENCLAW_DISABLE_USER_MCP_SERVERS` | `true` | Clears configured `mcp.servers` during repair to avoid unbounded MCP subprocesses on Railway; set to `false` if you intentionally run MCP servers there |
 | `OPENCLAW_PLUGIN_STAGE_DIR` | `/tmp/openclaw-plugin-runtime-deps` | Keeps large generated plugin runtime dependencies off the persistent Railway volume |
 | `OPENCLAW_MANAGE_GMAIL_WATCHER` | `false` | Set to `true` only for older OpenClaw builds that do not manage the Gmail hook listener themselves |
 
@@ -119,7 +120,7 @@ The web TUI implements multiple security layers:
 
 This template defaults to conservative concurrency so a small Railway service does not fan out into many simultaneous agent or ACP processes. Increase `OPENCLAW_ACP_MAX_CONCURRENT_SESSIONS`, `OPENCLAW_AGENT_MAX_CONCURRENT`, or `OPENCLAW_AGENT_SUBAGENT_MAX_CONCURRENT` only if you expect multiple active conversations or cron jobs to run at the same time.
 
-For deeper savings, the wrapper seeds a Telegram/Codex-focused Railway profile by default: unused bundled model providers, extra chat/file-transfer channels, Bonjour/mDNS discovery, browser automation, memory-core, phone control, and voice are disabled unless you explicitly configure them. The wrapper also keeps `memory-core` and `slack` disabled by default on existing Railway volumes, because older OpenClaw configs can leave them enabled and consume memory even when the template is meant to be Telegram/Codex-only. Set `OPENCLAW_DEFAULT_DISABLED_PLUGINS` or `OPENCLAW_FORCE_DISABLED_PLUGINS` to a different comma-separated list, or to an empty value, if you want a broader plugin profile.
+For deeper savings, the wrapper seeds a Telegram/Codex-focused Railway profile by default: unused bundled model providers, extra chat/file-transfer channels, Bonjour/mDNS discovery, browser automation, memory-core, phone control, and voice are disabled unless you explicitly configure them. The wrapper also keeps `memory-core` and `slack` disabled by default on existing Railway volumes, because older OpenClaw configs can leave them enabled and consume memory even when the template is meant to be Telegram/Codex-only. It also clears configured `mcp.servers` by default, because MCP transports can spawn extra long-running child processes in background Codex sessions. Set `OPENCLAW_DEFAULT_DISABLED_PLUGINS`, `OPENCLAW_FORCE_DISABLED_PLUGINS`, or `OPENCLAW_DISABLE_USER_MCP_SERVERS=false` if you want a broader plugin/MCP profile.
 
 ## Local testing
 
