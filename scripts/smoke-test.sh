@@ -3,11 +3,11 @@
 # OpenClaw Railway Smoke Test
 # Tests a live Railway deployment by hitting health and debug endpoints.
 #
-# Usage: bash scripts/smoke-test.sh <RAILWAY_URL> <SETUP_PASSWORD> [expected-version]
+# Usage: bash scripts/smoke-test.sh <RAILWAY_URL> <SETUP_PASSWORD> [expected-openclaw-version] [expected-codex-version]
 #
 # Examples:
 #   bash scripts/smoke-test.sh https://myapp.up.railway.app mysecret
-#   bash scripts/smoke-test.sh https://myapp.up.railway.app mysecret 2026.4.11
+#   bash scripts/smoke-test.sh https://myapp.up.railway.app mysecret 2026.6.11 0.144.1
 #
 set -euo pipefail
 
@@ -17,9 +17,10 @@ set -euo pipefail
 BASE_URL="${1:-}"
 SETUP_PASSWORD="${2:-}"
 EXPECTED_VERSION="${3:-}"
+EXPECTED_CODEX_VERSION="${4:-}"
 
 if [[ -z "$BASE_URL" || -z "$SETUP_PASSWORD" ]]; then
-  echo "Usage: $0 <RAILWAY_URL> <SETUP_PASSWORD> [expected-version]"
+  echo "Usage: $0 <RAILWAY_URL> <SETUP_PASSWORD> [expected-openclaw-version] [expected-codex-version]"
   exit 1
 fi
 
@@ -44,17 +45,38 @@ fi
 # ---------------------------------------------------------------------------
 PASS=0
 FAIL=0
-AUTH_HEADER="Authorization: Basic $(echo -n "*:${SETUP_PASSWORD}" | base64)"
+HTTP_BODY=""
+HTTP_STATUS="000"
 
 check() {
   local label="$1"
   local ok="$2"
   if [[ "$ok" == "true" ]]; then
     echo "  PASS  $label"
-    ((PASS++))
+    ((PASS += 1))
   else
     echo "  FAIL  $label"
-    ((FAIL++))
+    ((FAIL += 1))
+  fi
+}
+
+normalize_openclaw_version() {
+  local raw="$1"
+  if [[ "$raw" =~ ([0-9]{4}\.[0-9]+\.[0-9]+([-.][[:alnum:].-]+)?) ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo "unknown"
+  fi
+}
+
+fetch_json() {
+  local response
+  if response=$(curl -sS --max-time 10 -w $'\n%{http_code}' "$@" 2>/dev/null); then
+    HTTP_STATUS="${response##*$'\n'}"
+    HTTP_BODY="${response%$'\n'*}"
+  else
+    HTTP_STATUS="000"
+    HTTP_BODY='{}'
   fi
 }
 
@@ -69,20 +91,34 @@ echo ""
 echo "--- Health Endpoints (no auth) ---"
 
 # /healthz
-HEALTHZ=$(curl -sf --max-time 10 "${BASE_URL}/healthz" 2>/dev/null || echo '{}')
+fetch_json "${BASE_URL}/healthz"
+HEALTHZ="$HTTP_BODY"
+HEALTHZ_STATUS="$HTTP_STATUS"
 HEALTHZ_OK=$(echo "$HEALTHZ" | jq -r '.ok // false')
 HEALTHZ_GW=$(echo "$HEALTHZ" | jq -r '.gateway // "unknown"')
+check "/healthz returns HTTP 200" "$( [[ "$HEALTHZ_STATUS" == "200" ]] && echo true || echo false )"
 check "/healthz returns ok:true" "$HEALTHZ_OK"
-echo "       gateway=$HEALTHZ_GW"
+echo "       status=$HEALTHZ_STATUS gateway=$HEALTHZ_GW"
 
 # /setup/healthz
-SETUP_HEALTHZ=$(curl -sf --max-time 10 "${BASE_URL}/setup/healthz" 2>/dev/null || echo '{}')
+fetch_json "${BASE_URL}/setup/healthz"
+SETUP_HEALTHZ="$HTTP_BODY"
+SETUP_HEALTHZ_STATUS="$HTTP_STATUS"
 SETUP_OK=$(echo "$SETUP_HEALTHZ" | jq -r '.ok // false')
 SETUP_CONFIGURED=$(echo "$SETUP_HEALTHZ" | jq -r '.configured // false')
 SETUP_GW_RUNNING=$(echo "$SETUP_HEALTHZ" | jq -r '.gatewayRunning // false')
+SETUP_GW_READY=$(echo "$SETUP_HEALTHZ" | jq -r '.gatewayReady // false')
 SETUP_GW_REACHABLE=$(echo "$SETUP_HEALTHZ" | jq -r '.gatewayReachable // false')
+check "/setup/healthz returns HTTP 200" "$( [[ "$SETUP_HEALTHZ_STATUS" == "200" ]] && echo true || echo false )"
 check "/setup/healthz returns ok:true" "$SETUP_OK"
-echo "       configured=$SETUP_CONFIGURED gatewayRunning=$SETUP_GW_RUNNING gatewayReachable=$SETUP_GW_REACHABLE"
+echo "       status=$SETUP_HEALTHZ_STATUS configured=$SETUP_CONFIGURED gatewayRunning=$SETUP_GW_RUNNING gatewayReady=$SETUP_GW_READY gatewayReachable=$SETUP_GW_REACHABLE"
+
+if [[ "$SETUP_CONFIGURED" == "true" ]]; then
+  check "/healthz reports gateway ready" "$( [[ "$HEALTHZ_GW" == "ready" ]] && echo true || echo false )"
+  check "/setup/healthz reports gateway running" "$SETUP_GW_RUNNING"
+  check "/setup/healthz reports gateway ready" "$SETUP_GW_READY"
+  check "/setup/healthz reports gateway reachable" "$SETUP_GW_REACHABLE"
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Authenticated endpoints
@@ -91,10 +127,12 @@ echo ""
 echo "--- Debug & Status Endpoints (Basic auth) ---"
 
 # /setup/api/debug
-DEBUG_RESP=$(curl -sf --max-time 10 -H "$AUTH_HEADER" "${BASE_URL}/setup/api/debug" 2>/dev/null || echo '{}')
+fetch_json -u "*:${SETUP_PASSWORD}" "${BASE_URL}/setup/api/debug"
+DEBUG_RESP="$HTTP_BODY"
 DEBUG_NODE=$(echo "$DEBUG_RESP" | jq -r '.wrapper.node // "unknown"')
 DEBUG_PORT=$(echo "$DEBUG_RESP" | jq -r '.wrapper.port // "unknown"')
-DEBUG_OC_VERSION=$(echo "$DEBUG_RESP" | jq -r '.openclaw.version // "unknown"')
+DEBUG_OC_VERSION_RAW=$(echo "$DEBUG_RESP" | jq -r '.openclaw.version // "unknown"')
+DEBUG_OC_VERSION=$(normalize_openclaw_version "$DEBUG_OC_VERSION_RAW")
 DEBUG_TOKEN_PERSISTED=$(echo "$DEBUG_RESP" | jq -r '.wrapper.gatewayTokenPersisted // false')
 
 if [[ "$DEBUG_OC_VERSION" != "unknown" ]]; then
@@ -106,8 +144,19 @@ else
 fi
 
 # /setup/api/status
-STATUS_CODE=$(curl -so /dev/null -w "%{http_code}" --max-time 10 -H "$AUTH_HEADER" "${BASE_URL}/setup/api/status" 2>/dev/null || echo "000")
+fetch_json -u "*:${SETUP_PASSWORD}" "${BASE_URL}/setup/api/status"
+STATUS_RESP="$HTTP_BODY"
+STATUS_CODE="$HTTP_STATUS"
+STATUS_CODEX_VERSION=$(echo "$STATUS_RESP" | jq -r '.codexCliVersion // "unknown"')
 check "/setup/api/status returns 200" "$( [[ "$STATUS_CODE" == "200" ]] && echo true || echo false )"
+
+if [[ -n "$EXPECTED_CODEX_VERSION" ]]; then
+  if [[ "$STATUS_CODEX_VERSION" =~ (^|[^0-9.])${EXPECTED_CODEX_VERSION//./\.}([^0-9.]|$) ]]; then
+    check "Codex CLI version matches expected ($EXPECTED_CODEX_VERSION)" "true"
+  else
+    check "Codex CLI version matches expected ($EXPECTED_CODEX_VERSION), got: $STATUS_CODEX_VERSION" "false"
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Version check (optional)
@@ -123,9 +172,9 @@ if [[ -n "$EXPECTED_VERSION" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Gateway proxy check (if configured and running)
+# 4. Gateway proxy check (if configured)
 # ---------------------------------------------------------------------------
-if [[ "$HEALTHZ_GW" == "ready" ]]; then
+if [[ "$SETUP_CONFIGURED" == "true" ]]; then
   echo ""
   echo "--- Gateway Proxy Check ---"
   PROXY_CODE=$(curl -so /dev/null -w "%{http_code}" --max-time 10 "${BASE_URL}/openclaw" 2>/dev/null || echo "000")

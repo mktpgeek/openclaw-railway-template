@@ -10,6 +10,20 @@ import httpProxy from "http-proxy";
 import pty from "node-pty";
 import { WebSocketServer } from "ws";
 
+import {
+  DEFAULT_GATEWAY_PROBE_TIMEOUT_MS,
+  probeGatewayLiveness,
+  probeGatewayReadiness,
+  resolveGatewayAvailability,
+  resolveGatewayHealth,
+  resolveGatewayRequestAction,
+} from "./gateway-availability.js";
+import {
+  DEFAULT_ACTIVE_START_TIMEOUT_MS,
+  runGatewayRecoveryAttempt,
+} from "./gateway-recovery.js";
+import { extractOpenclawVersion } from "./openclaw-version.js";
+
 const PORT = Number.parseInt(process.env.PORT ?? "8080", 10);
 const STATE_DIR =
   process.env.OPENCLAW_STATE_DIR?.trim() ||
@@ -109,7 +123,8 @@ let cachedOpenclawVersion = null;
 async function getOpenclawInfo() {
   if (!cachedOpenclawVersion) {
     const version = await runCmd(OPENCLAW_NODE, clawArgs(["--version"]));
-    cachedOpenclawVersion = version.output.trim();
+    const rawVersion = version.output.trim();
+    cachedOpenclawVersion = extractOpenclawVersion(rawVersion) || rawVersion;
   }
   return { version: cachedOpenclawVersion };
 }
@@ -120,6 +135,18 @@ const INTERNAL_GATEWAY_PORT = Number.parseInt(
 );
 const INTERNAL_GATEWAY_HOST = process.env.INTERNAL_GATEWAY_HOST ?? "127.0.0.1";
 const GATEWAY_TARGET = `http://${INTERNAL_GATEWAY_HOST}:${INTERNAL_GATEWAY_PORT}`;
+const GATEWAY_PROBE_TIMEOUT_MS = parsePositiveIntegerEnv(
+  "GATEWAY_PROBE_TIMEOUT_MS",
+  DEFAULT_GATEWAY_PROBE_TIMEOUT_MS,
+);
+const GATEWAY_RECOVERY_BASE_DELAY_MS = parsePositiveIntegerEnv(
+  "GATEWAY_RECOVERY_BASE_DELAY_MS",
+  2_000,
+);
+const GATEWAY_ACTIVE_START_TIMEOUT_MS = parsePositiveIntegerEnv(
+  "GATEWAY_ACTIVE_START_TIMEOUT_MS",
+  DEFAULT_ACTIVE_START_TIMEOUT_MS,
+);
 const GMAIL_WATCHER_PORT = Number.parseInt(
   process.env.GMAIL_WATCHER_PORT ?? "8788",
   10,
@@ -173,7 +200,7 @@ const AGENT_SUBAGENT_MAX_CONCURRENT = parsePositiveIntegerEnv(
 const AGENT_THINKING_DEFAULT =
   process.env.OPENCLAW_AGENT_THINKING_DEFAULT?.trim() || "high";
 const CODEX_CLI_VERSION =
-  process.env.OPENCLAW_CODEX_CLI_VERSION?.trim() || "0.134.0";
+  process.env.OPENCLAW_CODEX_CLI_VERSION?.trim() || "0.144.1";
 const RAILWAY_VOLUME_PATH =
   process.env.RAILWAY_VOLUME_MOUNT_PATH?.trim() || "/data";
 const CODEX_HOME =
@@ -427,11 +454,6 @@ function cleanupStaleSessionTempFiles() {
   }
 
   return { removed, freedBytes };
-}
-
-function extractOpenclawVersion(versionOutput) {
-  const match = String(versionOutput ?? "").match(/\b\d{4}\.\d+\.\d+(?:[-.a-zA-Z0-9]+)?\b/);
-  return match?.[0] || "";
 }
 
 function cleanupStalePluginRuntimeDeps(currentVersion) {
@@ -1706,6 +1728,8 @@ async function syncAllowedOrigins() {
 
 let gatewayProc = null;
 let gatewayStarting = null;
+let gatewayRestarting = null;
+let gatewayRecoveryTimer = null;
 let shuttingDown = false;
 let gatewayRestartCount = 0;
 let gatewayLastStartTime = 0;
@@ -1820,44 +1844,139 @@ function matchesProxyBasePath(requestPath, basePath) {
   return requestPath === basePath || requestPath.startsWith(`${basePath}/`);
 }
 
-async function probeGatewayOnce() {
-  const endpoints = ["/openclaw", "/", "/health"];
+function logGatewayProbeError(probe, probeKind) {
+  if (!probe.error) return;
 
-  for (const endpoint of endpoints) {
-    try {
-      const res = await fetch(`${GATEWAY_TARGET}${endpoint}`, {
-        method: "GET",
-      });
-      if (res) {
-        return { ok: true, endpoint };
-      }
-    } catch (err) {
-      if (err.code !== "ECONNREFUSED" && err.cause?.code !== "ECONNREFUSED") {
-        const msg = err.code || err.message;
-        if (msg !== "fetch failed" && msg !== "UND_ERR_CONNECT_TIMEOUT") {
-          log.warn("gateway", `health check error: ${msg}`);
-        }
-      }
+  const err = probe.error;
+  if (err.code !== "ECONNREFUSED" && err.cause?.code !== "ECONNREFUSED") {
+    const msg = err.code || err.message;
+    if (
+      msg !== "fetch failed" &&
+      msg !== "UND_ERR_CONNECT_TIMEOUT" &&
+      err.name !== "TimeoutError"
+    ) {
+      log.warn("gateway", `${probeKind} check error: ${msg}`);
     }
   }
-
-  return { ok: false, endpoint: null };
 }
 
-async function waitForGatewayReady(opts = {}) {
+async function probeGatewayLivenessOnce() {
+  const probe = await probeGatewayLiveness({
+    target: GATEWAY_TARGET,
+    timeoutMs: GATEWAY_PROBE_TIMEOUT_MS,
+  });
+  logGatewayProbeError(probe, "liveness");
+  return probe;
+}
+
+async function probeGatewayReadinessOnce() {
+  const probe = await probeGatewayReadiness({
+    target: GATEWAY_TARGET,
+    timeoutMs: GATEWAY_PROBE_TIMEOUT_MS,
+  });
+  logGatewayProbeError(probe, "readiness");
+  return probe;
+}
+
+async function getGatewayAvailability(options = {}) {
+  return resolveGatewayAvailability({
+    managedProcessReady: gatewayProc !== null && gatewayStarting === null,
+    gatewayStarting: gatewayStarting !== null,
+    requireProbe: options.requireProbe === true,
+    probeGateway: options.probeGateway ?? probeGatewayLivenessOnce,
+  });
+}
+
+async function waitForGatewayLive(opts = {}) {
   const timeoutMs = opts.timeoutMs ?? 60_000;
   const start = Date.now();
 
   while (Date.now() - start < timeoutMs) {
-    const probe = await probeGatewayOnce();
+    const probe = await probeGatewayLivenessOnce();
     if (probe.ok) {
-      log.info("gateway", `ready at ${probe.endpoint}`);
+      log.info("gateway", `live at ${probe.endpoint}`);
       return true;
+    }
+    if (!gatewayProc) {
+      log.error("gateway", "process exited before becoming live");
+      return false;
     }
     await sleep(250);
   }
-  log.error("gateway", `failed to become ready after ${timeoutMs / 1000} seconds`);
+  log.error("gateway", `failed to become live after ${timeoutMs / 1000} seconds`);
   return false;
+}
+
+function scheduleGatewayRecovery(uptime = 0) {
+  if (
+    shuttingDown ||
+    intentionalRestart ||
+    !isConfigured() ||
+    gatewayRecoveryTimer
+  ) {
+    return;
+  }
+
+  if (uptime > 30_000) {
+    gatewayRestartCount = 0;
+  } else {
+    gatewayRestartCount += 1;
+  }
+
+  const delay = Math.min(
+    GATEWAY_RECOVERY_BASE_DELAY_MS * Math.pow(2, gatewayRestartCount),
+    60_000,
+  );
+  log.info(
+    "gateway",
+    `scheduling recovery in ${delay / 1000}s (attempt ${gatewayRestartCount}, uptime ${Math.round(uptime / 1000)}s)...`,
+  );
+
+  gatewayRecoveryTimer = setTimeout(async () => {
+    let retry = false;
+    let exitForStuckStart = false;
+    try {
+      const result = await runGatewayRecoveryAttempt({
+        activeStartTimeoutMs: GATEWAY_ACTIVE_START_TIMEOUT_MS,
+        getActiveStart: () => gatewayRestarting ?? gatewayStarting,
+        shouldAbort: () =>
+          shuttingDown || intentionalRestart || !isConfigured(),
+        probeGateway: probeGatewayLivenessOnce,
+        recoverGateway: () =>
+          gatewayProc
+            ? restartGateway({ resetBackoff: false })
+            : ensureGatewayRunning(),
+      });
+
+      if (result.status === "reachable") {
+        log.info(
+          "gateway",
+          `gateway reachable at ${result.probe.endpoint}; recovery not needed`,
+        );
+        gatewayRestartCount = 0;
+      } else if (result.status === "restarted") {
+        log.info("gateway", "automatic recovery succeeded");
+        gatewayRestartCount = 0;
+      } else if (result.status === "failed") {
+        log.error("gateway", `automatic recovery failed: ${result.error.message}`);
+        retry = true;
+      } else if (result.status === "start-timeout") {
+        log.error(
+          "gateway",
+          `start remained stuck for ${GATEWAY_ACTIVE_START_TIMEOUT_MS}ms; exiting so Railway can replace the wrapper`,
+        );
+        exitForStuckStart = true;
+      }
+    } catch (err) {
+      log.error("gateway", `automatic recovery failed: ${err.message}`);
+      retry = true;
+    } finally {
+      gatewayRecoveryTimer = null;
+    }
+
+    if (exitForStuckStart) process.exit(1);
+    if (retry) scheduleGatewayRecovery(0);
+  }, delay);
 }
 
 async function startGateway() {
@@ -1900,14 +2019,16 @@ async function startGateway() {
     "--allow-unconfigured",
   ];
 
-  gatewayLastStartTime = Date.now();
-  gatewayProc = childProcess.spawn(OPENCLAW_NODE, clawArgs(args), {
+  const startedAt = Date.now();
+  gatewayLastStartTime = startedAt;
+  const child = childProcess.spawn(OPENCLAW_NODE, clawArgs(args), {
     stdio: "inherit",
     env: buildChildEnv({
       OPENCLAW_STATE_DIR: STATE_DIR,
       OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
     }),
   });
+  gatewayProc = child;
 
   const safeArgs = args.map((arg, i) =>
     args[i - 1] === "--token" ? "[REDACTED]" : arg
@@ -1917,67 +2038,54 @@ async function startGateway() {
   log.info("gateway", `WORKSPACE_DIR: ${WORKSPACE_DIR}`);
   log.info("gateway", `config path: ${configPath()}`);
 
-  gatewayProc.on("error", (err) => {
+  child.once("error", (err) => {
+    if (gatewayProc !== child) return;
     log.error("gateway", `spawn error: ${String(err)}`);
     gatewayProc = null;
+    scheduleGatewayRecovery(Date.now() - startedAt);
   });
 
-  gatewayProc.on("exit", (code, signal) => {
+  child.once("exit", (code, signal) => {
+    if (gatewayProc !== child) return;
     log.error("gateway", `exited code=${code} signal=${signal}`);
-    const uptime = Date.now() - gatewayLastStartTime;
     gatewayProc = null;
-    if (!shuttingDown && !intentionalRestart && isConfigured()) {
-      if (uptime > 30_000) {
-        gatewayRestartCount = 0;
-      } else {
-        gatewayRestartCount++;
-      }
-      const delay = Math.min(2000 * Math.pow(2, gatewayRestartCount), 60_000);
-      log.info("gateway", `scheduling auto-restart in ${delay / 1000}s (attempt ${gatewayRestartCount}, uptime ${Math.round(uptime / 1000)}s)...`);
-      setTimeout(async () => {
-        if (shuttingDown || gatewayProc || !isConfigured()) {
-          return;
-        }
-
-        const probe = await probeGatewayOnce();
-        if (probe.ok) {
-          log.info(
-            "gateway",
-            `gateway still reachable at ${probe.endpoint}; assuming OpenClaw restarted itself`,
-          );
-          gatewayRestartCount = 0;
-          return;
-        }
-
-        ensureGatewayRunning().catch((err) => {
-          log.error("gateway", `auto-restart failed: ${err.message}`);
-        });
-      }, delay);
-    }
+    scheduleGatewayRecovery(Date.now() - startedAt);
   });
+}
+
+function trackGatewayStart(startAttempt) {
+  const attempt = Promise.resolve().then(startAttempt);
+  const tracked = attempt.finally(() => {
+    if (gatewayStarting === tracked) gatewayStarting = null;
+  });
+  gatewayStarting = tracked;
+  return tracked;
 }
 
 async function ensureGatewayRunning() {
   if (!isConfigured()) return { ok: false, reason: "not configured" };
-  if (gatewayProc) return { ok: true };
-  const probe = await probeGatewayOnce();
-  if (probe.ok) {
-    return { ok: true, reason: "reachable" };
+  if (gatewayRestarting) return gatewayRestarting;
+
+  const availability = await getGatewayAvailability({ requireProbe: true });
+  if (availability.ok) {
+    return availability;
   }
+  const uptime = gatewayLastStartTime
+    ? Date.now() - gatewayLastStartTime
+    : 0;
+  scheduleGatewayRecovery(uptime);
   if (!gatewayStarting) {
-    gatewayStarting = (async () => {
+    trackGatewayStart(async () => {
       await syncAllowedOrigins();
       await startGateway();
-      const ready = await waitForGatewayReady({ timeoutMs: 60_000 });
-      if (!ready) {
-        throw new Error("Gateway did not become ready in time");
+      const live = await waitForGatewayLive({ timeoutMs: 60_000 });
+      if (!live) {
+        throw new Error("Gateway did not become live in time");
       }
-    })().finally(() => {
-      gatewayStarting = null;
     });
   }
   await gatewayStarting;
-  return { ok: true };
+  return getGatewayAvailability({ requireProbe: true });
 }
 
 async function probeGmailWatcherOnce() {
@@ -2135,28 +2243,61 @@ async function ensureGmailWatcherRunning() {
 }
 
 function isGatewayStarting() {
-  return gatewayStarting !== null;
+  return gatewayStarting !== null || gatewayRestarting !== null;
 }
 
-function isGatewayReady() {
-  return gatewayProc !== null && gatewayStarting === null;
-}
+function restartGateway({ resetBackoff = true } = {}) {
+  if (gatewayRestarting) return gatewayRestarting;
 
-async function restartGateway() {
-  if (gatewayProc) {
-    intentionalRestart = true;
-    try {
-      gatewayProc.kill("SIGTERM");
-    } catch (err) {
-      log.warn("gateway", `kill error: ${err.message}`);
+  const operation = (async () => {
+    const activeStart = gatewayStarting;
+    if (activeStart) {
+      try {
+        await activeStart;
+      } catch {
+        // Replace the failed start under the restart lock below.
+      }
     }
-    await sleep(750);
-    gatewayProc = null;
-    intentionalRestart = false;
-  }
-  await runCmd(OPENCLAW_NODE, clawArgs(["gateway", "stop"]));
-  gatewayRestartCount = 0;
-  return ensureGatewayRunning();
+
+    const restartAttempt = trackGatewayStart(async () => {
+      const childToStop = gatewayProc;
+      if (childToStop) {
+        intentionalRestart = true;
+        try {
+          const exited = new Promise((resolve) =>
+            childToStop.once("exit", resolve),
+          );
+          try {
+            childToStop.kill("SIGTERM");
+          } catch (err) {
+            log.warn("gateway", `kill error: ${err.message}`);
+          }
+          await Promise.race([exited, sleep(750)]);
+        } finally {
+          if (gatewayProc === childToStop) gatewayProc = null;
+          intentionalRestart = false;
+        }
+      }
+
+      await runCmd(OPENCLAW_NODE, clawArgs(["gateway", "stop"]));
+      if (resetBackoff) gatewayRestartCount = 0;
+      await syncAllowedOrigins();
+      await startGateway();
+      const live = await waitForGatewayLive({ timeoutMs: 60_000 });
+      if (!live) {
+        throw new Error("Gateway did not become live in time");
+      }
+    });
+
+    await restartAttempt;
+    return getGatewayAvailability({ requireProbe: true });
+  })();
+
+  const tracked = operation.finally(() => {
+    if (gatewayRestarting === tracked) gatewayRestarting = null;
+  });
+  gatewayRestarting = tracked;
+  return tracked;
 }
 
 let volumeJanitorRunning = false;
@@ -2291,10 +2432,24 @@ app.get("/styles.css", (_req, res) => {
 });
 
 app.get("/healthz", async (_req, res) => {
-  let gateway = "unconfigured";
-  if (isConfigured()) {
-    gateway = isGatewayReady() ? "ready" : "starting";
+  const configured = isConfigured();
+  const readiness = configured
+    ? await getGatewayAvailability({
+        requireProbe: true,
+        probeGateway: probeGatewayReadinessOnce,
+      })
+    : { ok: false, reason: "not-configured", endpoint: null };
+  const liveness =
+    configured && !readiness.ok
+      ? await getGatewayAvailability({ requireProbe: true })
+      : readiness;
+  if (configured && !liveness.ok) {
+    const uptime = gatewayLastStartTime
+      ? Date.now() - gatewayLastStartTime
+      : 0;
+    scheduleGatewayRecovery(uptime);
   }
+  const health = resolveGatewayHealth({ configured, availability: readiness });
   let gmailWatcher = "unconfigured";
   if (getGmailWatcherConfig()) {
     if (MANAGE_GMAIL_WATCHER) {
@@ -2304,12 +2459,36 @@ app.get("/healthz", async (_req, res) => {
       gmailWatcher = probe.ok ? "ready" : "starting";
     }
   }
-  res.json({ ok: true, gateway, gmailWatcher });
+  res
+    .status(health.httpStatus)
+    .json({
+      ok: health.ok,
+      gateway: health.gateway,
+      gatewayLive: liveness.ok,
+      gmailWatcher,
+    });
 });
 
 app.get("/setup/healthz", async (_req, res) => {
   const configured = isConfigured();
-  const gatewayRunning = isGatewayReady();
+  const readiness = configured
+    ? await getGatewayAvailability({
+        requireProbe: true,
+        probeGateway: probeGatewayReadinessOnce,
+      })
+    : { ok: false, reason: "not-configured", endpoint: null };
+  const liveness =
+    configured && !readiness.ok
+      ? await getGatewayAvailability({ requireProbe: true })
+      : readiness;
+  if (configured && !liveness.ok) {
+    const uptime = gatewayLastStartTime
+      ? Date.now() - gatewayLastStartTime
+      : 0;
+    scheduleGatewayRecovery(uptime);
+  }
+  const gatewayRunning = liveness.ok;
+  const gatewayReady = readiness.ok;
   const starting = isGatewayStarting();
   let gatewayReachable = false;
 
@@ -2321,13 +2500,23 @@ app.get("/setup/healthz", async (_req, res) => {
     );
   }
 
-  res.json({
-    ok: true,
+  const health = resolveGatewayHealth({
+    configured,
+    availability: {
+      ...readiness,
+      ok: readiness.ok && gatewayReachable,
+    },
+  });
+
+  res.status(health.httpStatus).json({
+    ok: health.ok,
     wrapper: true,
     configured,
     gatewayRunning,
+    gatewayReady,
     gatewayStarting: starting,
     gatewayReachable,
+    gatewayReason: readiness.reason,
   });
 });
 
@@ -3633,7 +3822,8 @@ app.post("/setup/api/doctor", requireSetupAuth, async (_req, res) => {
   );
   let codexLogRestartOk = true;
   let codexLogRestartOutput = "";
-  if (codexLogRepair.changed && isGatewayReady()) {
+  const gatewayAvailable = (await getGatewayAvailability()).ok;
+  if (codexLogRepair.changed && gatewayAvailable) {
     try {
       await restartGateway();
       codexLogRestartOutput =
@@ -4087,20 +4277,22 @@ app.use(async (req, res) => {
   }
 
   if (isConfigured()) {
-    if (!isGatewayReady()) {
-      try {
-        await ensureGatewayRunning();
-      } catch {
-        return res
-          .status(503)
-          .sendFile(path.join(process.cwd(), "src", "public", "loading.html"));
-      }
+    let availability;
+    try {
+      availability = await ensureGatewayRunning();
+    } catch {
+      return res
+        .status(503)
+        .sendFile(path.join(process.cwd(), "src", "public", "loading.html"));
+    }
 
-      if (!isGatewayReady()) {
-        return res
-          .status(503)
-          .sendFile(path.join(process.cwd(), "src", "public", "loading.html"));
-      }
+    if (
+      resolveGatewayRequestAction({ configured: true, availability }) !==
+      "proxy"
+    ) {
+      return res
+        .status(503)
+        .sendFile(path.join(process.cwd(), "src", "public", "loading.html"));
     }
   }
 
@@ -4211,7 +4403,15 @@ server.on("upgrade", async (req, socket, head) => {
     return;
   }
   try {
-    await ensureGatewayRunning();
+    const availability = await ensureGatewayRunning();
+    if (
+      resolveGatewayRequestAction({ configured: true, availability }) !==
+      "proxy"
+    ) {
+      log.warn("websocket", `gateway unavailable: ${availability.reason}`);
+      socket.destroy();
+      return;
+    }
   } catch (err) {
     log.warn("websocket", `gateway not ready: ${err.message}`);
     socket.destroy();
