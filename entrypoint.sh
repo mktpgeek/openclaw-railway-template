@@ -61,6 +61,8 @@ export LOGNAME=openclaw
 export XDG_CONFIG_HOME=/data/.config
 export CODEX_HOME=/data/.codex
 export CLOUDSDK_CONFIG=/data/.config/gcloud
-export PATH="/data/google-cloud-sdk/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
+export PATH="/data/.local/bin:/data/google-cloud-sdk/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
+
+source /app/scripts/start-tailscale.sh
 
 exec gosu openclaw node src/server.js

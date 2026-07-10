@@ -24,6 +24,7 @@ RUN corepack enable && pnpm install --frozen-lockfile --prod
 COPY src ./src
 COPY plugins ./plugins
 COPY --chmod=755 entrypoint.sh ./entrypoint.sh
+COPY --chmod=755 scripts/start-tailscale.sh ./scripts/start-tailscale.sh
 
 RUN useradd -m -s /bin/bash openclaw \
   && chown -R openclaw:openclaw /app \

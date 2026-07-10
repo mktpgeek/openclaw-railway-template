@@ -111,6 +111,10 @@ The web TUI implements multiple security layers:
 | `OPENCLAW_TEMPLATE_CODEX_APP_SERVER_BIN` | Auto-detected `codex` | Optional executable override for OpenClaw's Codex app-server bridge |
 | `GATEWAY_RECOVERY_BASE_DELAY_MS` | `2000` | Base delay for exponential gateway recovery retries |
 | `GATEWAY_ACTIVE_START_TIMEOUT_MS` | `90000` | Maximum time recovery waits for a stuck gateway start before exiting for replacement |
+| `OPENCLAW_TAILSCALE_ENABLED` | `auto` | Starts userspace Tailscale when persistent state or the iMessage SSH bridge is present |
+| `OPENCLAW_TAILSCALE_REQUIRED` | `false` | Fail container startup if a configured Tailscale daemon cannot become ready |
+| `OPENCLAW_TAILSCALE_STATE_DIR` | `/data/.tailscale` | Persistent Tailscale state and socket directory |
+| `OPENCLAW_TEMPLATE_TAILSCALE_SOCKET` | `/data/.tailscale/tailscaled.sock` | Optional socket override; exported to the iMessage bridge as `OPENCLAW_TAILSCALE_SOCKET` |
 | `OPENCLAW_CODEX_LOG_DB_MAX_BYTES` | `536870912` (512 MB) | Maximum persisted Codex log database size before the wrapper rotates it |
 | `OPENCLAW_VOLUME_JANITOR_INTERVAL_MS` | `900000` (15 min) | How often the wrapper checks Railway volume pressure and transient cleanup |
 | `OPENCLAW_DEFAULT_DISABLED_PLUGINS` | Telegram/Codex-only profile | Comma-separated OpenClaw plugins the wrapper disables on first repair unless explicitly configured |
