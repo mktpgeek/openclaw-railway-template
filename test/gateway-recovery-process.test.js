@@ -45,7 +45,7 @@ test("a failed automatic recovery schedules another attempt", async () => {
       INTERNAL_GATEWAY_PORT: String(gatewayPort),
       NPM_CONFIG_PREFIX: path.join(stateDir, "npm-prefix"),
       OPENCLAW_CONFIG_PATH: configPath,
-      OPENCLAW_CODEX_CLI_VERSION: "0.144.1",
+      OPENCLAW_CODEX_CLI_VERSION: "0.134.0",
       OPENCLAW_ENTRY: "/definitely/missing-openclaw-entry.js",
       OPENCLAW_STATE_DIR: stateDir,
       OPENCLAW_WORKSPACE_DIR: path.join(stateDir, "workspace"),
@@ -88,6 +88,8 @@ test("a failed automatic recovery schedules another attempt", async () => {
       output,
     );
     assert.match(output, /automatic recovery failed/);
+    assert.match(output, /ignoring stale OPENCLAW_CODEX_CLI_VERSION=0\.134\.0/);
+    assert.ok(output.includes(`Codex app-server binary: ${fakeCodexPath}`));
     assert.doesNotMatch(output, /npm install -g/);
   } finally {
     if (!closed) child.kill("SIGTERM");

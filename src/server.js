@@ -22,7 +22,10 @@ import {
   DEFAULT_ACTIVE_START_TIMEOUT_MS,
   runGatewayRecoveryAttempt,
 } from "./gateway-recovery.js";
-import { extractOpenclawVersion } from "./openclaw-version.js";
+import {
+  extractOpenclawVersion,
+  selectVersionAtLeast,
+} from "./openclaw-version.js";
 
 const PORT = Number.parseInt(process.env.PORT ?? "8080", 10);
 const STATE_DIR =
@@ -92,6 +95,25 @@ function parsePositiveIntegerEnv(name, fallback) {
 
   log.warn("config", `invalid ${name}=${JSON.stringify(raw)}; using ${fallback}`);
   return fallback;
+}
+
+function resolveExecutableOnPath(command) {
+  const names =
+    process.platform === "win32"
+      ? [`${command}.cmd`, `${command}.exe`, command]
+      : [command];
+
+  for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (!directory) continue;
+    for (const name of names) {
+      const candidate = path.join(directory, name);
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch {}
+    }
+  }
+  return command;
 }
 
 function resolveGatewayToken() {
@@ -199,8 +221,27 @@ const AGENT_SUBAGENT_MAX_CONCURRENT = parsePositiveIntegerEnv(
 );
 const AGENT_THINKING_DEFAULT =
   process.env.OPENCLAW_AGENT_THINKING_DEFAULT?.trim() || "high";
-const CODEX_CLI_VERSION =
-  process.env.OPENCLAW_CODEX_CLI_VERSION?.trim() || "0.144.1";
+const MIN_CODEX_CLI_VERSION = "0.144.1";
+const REQUESTED_CODEX_CLI_VERSION =
+  process.env.OPENCLAW_CODEX_CLI_VERSION?.trim();
+const CODEX_CLI_VERSION = selectVersionAtLeast(
+  REQUESTED_CODEX_CLI_VERSION,
+  MIN_CODEX_CLI_VERSION,
+);
+if (
+  REQUESTED_CODEX_CLI_VERSION &&
+  REQUESTED_CODEX_CLI_VERSION !== CODEX_CLI_VERSION
+) {
+  log.warn(
+    "config",
+    `ignoring stale OPENCLAW_CODEX_CLI_VERSION=${REQUESTED_CODEX_CLI_VERSION}; minimum is ${MIN_CODEX_CLI_VERSION}`,
+  );
+}
+const CODEX_APP_SERVER_BIN =
+  process.env.OPENCLAW_TEMPLATE_CODEX_APP_SERVER_BIN?.trim() ||
+  resolveExecutableOnPath("codex");
+process.env.OPENCLAW_CODEX_CLI_VERSION = CODEX_CLI_VERSION;
+process.env.OPENCLAW_CODEX_APP_SERVER_BIN = CODEX_APP_SERVER_BIN;
 const RAILWAY_VOLUME_PATH =
   process.env.RAILWAY_VOLUME_MOUNT_PATH?.trim() || "/data";
 const CODEX_HOME =
@@ -2026,6 +2067,8 @@ async function startGateway() {
     env: buildChildEnv({
       OPENCLAW_STATE_DIR: STATE_DIR,
       OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+      OPENCLAW_CODEX_APP_SERVER_BIN: CODEX_APP_SERVER_BIN,
+      OPENCLAW_CODEX_CLI_VERSION: CODEX_CLI_VERSION,
     }),
   });
   gatewayProc = child;
@@ -2037,6 +2080,7 @@ async function startGateway() {
   log.info("gateway", `STATE_DIR: ${STATE_DIR}`);
   log.info("gateway", `WORKSPACE_DIR: ${WORKSPACE_DIR}`);
   log.info("gateway", `config path: ${configPath()}`);
+  log.info("gateway", `Codex app-server binary: ${CODEX_APP_SERVER_BIN}`);
 
   child.once("error", (err) => {
     if (gatewayProc !== child) return;
