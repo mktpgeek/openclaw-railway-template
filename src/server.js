@@ -20,6 +20,7 @@ import {
 } from "./gateway-availability.js";
 import {
   DEFAULT_ACTIVE_START_TIMEOUT_MS,
+  DEFAULT_GATEWAY_START_TIMEOUT_MS,
   runGatewayRecoveryAttempt,
 } from "./gateway-recovery.js";
 import {
@@ -172,6 +173,10 @@ const GATEWAY_RECOVERY_BASE_DELAY_MS = parsePositiveIntegerEnv(
 const GATEWAY_ACTIVE_START_TIMEOUT_MS = parsePositiveIntegerEnv(
   "GATEWAY_ACTIVE_START_TIMEOUT_MS",
   DEFAULT_ACTIVE_START_TIMEOUT_MS,
+);
+const GATEWAY_START_TIMEOUT_MS = parsePositiveIntegerEnv(
+  "GATEWAY_START_TIMEOUT_MS",
+  DEFAULT_GATEWAY_START_TIMEOUT_MS,
 );
 const GATEWAY_MAINTENANCE_STOP_TIMEOUT_MS = parsePositiveIntegerEnv(
   "GATEWAY_MAINTENANCE_STOP_TIMEOUT_MS",
@@ -1937,7 +1942,7 @@ async function getGatewayAvailability(options = {}) {
 }
 
 async function waitForGatewayLive(opts = {}) {
-  const timeoutMs = opts.timeoutMs ?? 60_000;
+  const timeoutMs = opts.timeoutMs ?? GATEWAY_START_TIMEOUT_MS;
   const start = Date.now();
 
   while (Date.now() - start < timeoutMs) {
@@ -2130,7 +2135,7 @@ async function ensureGatewayRunning() {
     trackGatewayStart(async () => {
       await syncAllowedOrigins();
       await startGateway();
-      const live = await waitForGatewayLive({ timeoutMs: 60_000 });
+      const live = await waitForGatewayLive();
       if (!live) {
         throw new Error("Gateway did not become live in time");
       }
@@ -2335,7 +2340,7 @@ function restartGateway({ resetBackoff = true } = {}) {
       if (resetBackoff) gatewayRestartCount = 0;
       await syncAllowedOrigins();
       await startGateway();
-      const live = await waitForGatewayLive({ timeoutMs: 60_000 });
+      const live = await waitForGatewayLive();
       if (!live) {
         throw new Error("Gateway did not become live in time");
       }

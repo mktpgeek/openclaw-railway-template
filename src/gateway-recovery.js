@@ -1,4 +1,6 @@
-export const DEFAULT_ACTIVE_START_TIMEOUT_MS = 90_000;
+export const DEFAULT_GATEWAY_START_TIMEOUT_MS = 10 * 60_000;
+export const DEFAULT_ACTIVE_START_TIMEOUT_MS =
+  DEFAULT_GATEWAY_START_TIMEOUT_MS + 30_000;
 
 function waitForActiveStart(activeStart, timeoutMs) {
   return new Promise((resolve) => {

@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { runGatewayRecoveryAttempt } from "../src/gateway-recovery.js";
+import {
+  DEFAULT_ACTIVE_START_TIMEOUT_MS,
+  DEFAULT_GATEWAY_START_TIMEOUT_MS,
+  runGatewayRecoveryAttempt,
+} from "../src/gateway-recovery.js";
+
+test("allows startup migrations to outlive their five-minute lease", () => {
+  assert.ok(DEFAULT_GATEWAY_START_TIMEOUT_MS > 5 * 60_000);
+  assert.ok(DEFAULT_ACTIVE_START_TIMEOUT_MS > DEFAULT_GATEWAY_START_TIMEOUT_MS);
+});
 
 test("waits for an active start attempt before recovering", async () => {
   let rejectStart;
