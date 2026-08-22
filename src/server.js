@@ -23,6 +23,10 @@ import {
   runGatewayRecoveryAttempt,
 } from "./gateway-recovery.js";
 import {
+  DEFAULT_GATEWAY_MAINTENANCE_STOP_TIMEOUT_MS,
+  stopManagedChild,
+} from "./gateway-maintenance.js";
+import {
   extractOpenclawVersion,
   selectVersionAtLeast,
 } from "./openclaw-version.js";
@@ -168,6 +172,10 @@ const GATEWAY_RECOVERY_BASE_DELAY_MS = parsePositiveIntegerEnv(
 const GATEWAY_ACTIVE_START_TIMEOUT_MS = parsePositiveIntegerEnv(
   "GATEWAY_ACTIVE_START_TIMEOUT_MS",
   DEFAULT_ACTIVE_START_TIMEOUT_MS,
+);
+const GATEWAY_MAINTENANCE_STOP_TIMEOUT_MS = parsePositiveIntegerEnv(
+  "GATEWAY_MAINTENANCE_STOP_TIMEOUT_MS",
+  DEFAULT_GATEWAY_MAINTENANCE_STOP_TIMEOUT_MS,
 );
 const GMAIL_WATCHER_PORT = Number.parseInt(
   process.env.GMAIL_WATCHER_PORT ?? "8788",
@@ -2352,16 +2360,21 @@ function getLargestCodexLogDatabase() {
 
 async function stopGatewayForMaintenance(reason) {
   log.warn("volume-janitor", `stopping gateway for maintenance: ${reason}`);
-  if (gatewayProc) {
+  const childToStop = gatewayProc;
+  if (childToStop) {
     intentionalRestart = true;
     try {
-      gatewayProc.kill("SIGTERM");
-    } catch (err) {
-      log.warn("volume-janitor", `gateway kill error: ${err.message}`);
+      const result = await stopManagedChild(childToStop, {
+        timeoutMs: GATEWAY_MAINTENANCE_STOP_TIMEOUT_MS,
+      });
+      if (!result.exited) {
+        throw new Error(
+          `gateway did not exit within ${GATEWAY_MAINTENANCE_STOP_TIMEOUT_MS}ms`,
+        );
+      }
+    } finally {
+      intentionalRestart = false;
     }
-    await sleep(5000);
-    gatewayProc = null;
-    intentionalRestart = false;
   }
 
   const stopResult = await runCmd(OPENCLAW_NODE, clawArgs(["gateway", "stop"]));
