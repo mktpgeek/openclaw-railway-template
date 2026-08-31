@@ -14,7 +14,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 RUN OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS=1 \
-  npm install -g openclaw@2026.8.1 clawhub@latest acpx@0.10.0 @openai/codex@0.144.1 @anthropic-ai/claude-code@2.1.153
+  npm install -g openclaw@2026.8.1 clawhub@latest acpx@0.10.0 @openai/codex@0.151.0 @anthropic-ai/claude-code@2.1.153
 
 WORKDIR /app
 
@@ -47,6 +47,7 @@ ENV HOMEBREW_REPOSITORY="/home/linuxbrew/.linuxbrew/Homebrew"
 ENV PORT=8080
 ENV NODE_OPTIONS=--max-old-space-size=1024
 ENV OPENCLAW_ENTRY=/usr/local/lib/node_modules/openclaw/dist/entry.js
+ENV OPENCLAW_NO_AUTO_UPDATE=1
 ENV OPENCLAW_PLUGIN_STAGE_DIR=/tmp/openclaw-plugin-runtime-deps
 ENV CODEX_HOME=/data/.codex
 EXPOSE 8080

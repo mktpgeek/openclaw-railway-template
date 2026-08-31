@@ -107,7 +107,8 @@ The web TUI implements multiple security layers:
 | `OPENCLAW_AGENT_MAX_CONCURRENT` | `2` | Default OpenClaw agent session concurrency cap |
 | `OPENCLAW_AGENT_SUBAGENT_MAX_CONCURRENT` | `2` | Default subagent fanout cap |
 | `OPENCLAW_AGENT_THINKING_DEFAULT` | `high` | Default thinking level for new/repaired setups |
-| `OPENCLAW_CODEX_CLI_VERSION` | `0.144.1` | Codex CLI version baked into the image / installed during ACP bootstrap; values below the image minimum are ignored |
+| `OPENCLAW_CODEX_CLI_VERSION` | `0.151.0` | Codex CLI version baked into the image / installed during ACP bootstrap; values below the image minimum are ignored |
+| `OPENCLAW_NO_AUTO_UPDATE` | `1` | Prevents in-place automatic updates; update the Dockerfile pin and redeploy instead |
 | `OPENCLAW_TEMPLATE_CODEX_APP_SERVER_BIN` | Auto-detected `codex` | Optional executable override for OpenClaw's Codex app-server bridge |
 | `GATEWAY_RECOVERY_BASE_DELAY_MS` | `2000` | Base delay for exponential gateway recovery retries |
 | `GATEWAY_START_TIMEOUT_MS` | `600000` | Maximum time a gateway start may spend on startup migrations before it is treated as failed |

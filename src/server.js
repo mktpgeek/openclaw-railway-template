@@ -234,7 +234,7 @@ const AGENT_SUBAGENT_MAX_CONCURRENT = parsePositiveIntegerEnv(
 );
 const AGENT_THINKING_DEFAULT =
   process.env.OPENCLAW_AGENT_THINKING_DEFAULT?.trim() || "high";
-const MIN_CODEX_CLI_VERSION = "0.144.1";
+const MIN_CODEX_CLI_VERSION = "0.151.0";
 const REQUESTED_CODEX_CLI_VERSION =
   process.env.OPENCLAW_CODEX_CLI_VERSION?.trim();
 const CODEX_CLI_VERSION = selectVersionAtLeast(
