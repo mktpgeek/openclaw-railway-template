@@ -14,7 +14,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 RUN OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS=1 \
-  npm install -g openclaw@2026.7.1-2 clawhub@latest acpx@0.10.0 @openai/codex@0.144.1 @anthropic-ai/claude-code@2.1.153
+  npm install -g openclaw@2026.8.1 clawhub@latest acpx@0.10.0 @openai/codex@0.144.1 @anthropic-ai/claude-code@2.1.153
 
 WORKDIR /app
 
